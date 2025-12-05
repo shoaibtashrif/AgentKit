@@ -1,0 +1,16 @@
+node_modules/
+.env
+*.log
+.DS_Store
+junk/
+.env
+__pycache__/
+.idea/
+venv/
+.venv/*
+codedump.txt
+.claudeignore
+.claude/
+.vscode/
+claude
+vscode

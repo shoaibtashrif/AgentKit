@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            font-weight: 600;
+        }
+
+        .status.disconnected {
+            background: #fee;
+            color: #c33;
+        }
+
+        .status.connected {
+            background: #efe;
+            color: #3c3;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 30px;
+        }
+
+        button {
+            padding: 15px 40px;
+            font-size: 16px;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        #recordBtn {
+            background: #667eea;
+            color: white;
+        }
+
+        #recordBtn.recording {
+            background: #ef4444;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .transcript-box {
+            background: #f9fafb;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            min-height: 150px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .transcript-box h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 8px;
+            line-height: 1.5;
+        }
+
+        .message.user {
+            background: #e0e7ff;
+            color: #3730a3;
+        }
+
+        .message.assistant {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .message strong {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            opacity: 0.7;
+        }
+
+        audio {
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .info {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Agent</h1>
+        <div id="status" class="status disconnected">Disconnected</div>
+
+        <div class="controls">
+            <button id="recordBtn">Start Talking</button>
+        </div>
+
+        <div class="transcript-box">
+            <h3>Conversation</h3>
+            <div id="transcriptArea"></div>
+        </div>
+
+        <div class="info">
+            Click "Start Talking" and speak into your microphone
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let isRecording = false;
+        let sessionId = null;
+        let audioQueue = [];
+        let isPlayingAudio = false;
+
+        const recordBtn = document.getElementById('recordBtn');
+        const statusDiv = document.getElementById('status');
+        const transcriptArea = document.getElementById('transcriptArea');
+
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:3000');
+
+            ws.onopen = () => {
+                statusDiv.textContent = 'Connected';
+                statusDiv.className = 'status connected';
+                console.log('WebSocket connected');
+            };
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received:', data);
+
+                switch(data.type) {
+                    case 'session_started':
+                        sessionId = data.sessionId;
+                        console.log('Session ID:', sessionId);
+                        break;
+
+                    case 'transcript':
+                        addMessage('user', data.text);
+                        break;
+
+                    case 'audio':
+                        playAudio(data.audio);
+                        break;
+
+                    case 'response':
+                        addMessage('assistant', data.text);
+                        break;
+
+                    case 'clear_audio':
+                        clearAudioQueue();
+                        break;
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                statusDiv.textContent = 'Error';
+                statusDiv.className = 'status disconnected';
+            };
+
+            ws.onclose = () => {
+                statusDiv.textContent = 'Disconnected';
+                statusDiv.className = 'status disconnected';
+                console.log('WebSocket disconnected');
+            };
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    if (isRecording && ws && ws.readyState === WebSocket.OPEN) {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const pcmData = new Int16Array(inputData.length);
+
+                        for (let i = 0; i < inputData.length; i++) {
+                            pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                        }
+
+                        ws.send(pcmData.buffer);
+                    }
+                };
+
+                isRecording = true;
+                recordBtn.textContent = 'Stop Talking';
+                recordBtn.classList.add('recording');
+
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                alert('Error accessing microphone. Please grant permission.');
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            recordBtn.textContent = 'Start Talking';
+            recordBtn.classList.remove('recording');
+        }
+
+        function addMessage(role, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            messageDiv.innerHTML = `<strong>${role === 'user' ? 'You' : 'Assistant'}:</strong>${text}`;
+            transcriptArea.appendChild(messageDiv);
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+        }
+
+        async function playAudio(base64Audio) {
+            audioQueue.push(base64Audio);
+            if (!isPlayingAudio) {
+                processAudioQueue();
+            }
+        }
+
+        function clearAudioQueue() {
+            audioQueue = [];
+            isPlayingAudio = false;
+            console.log('Audio queue cleared');
+        }
+
+        async function processAudioQueue() {
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                return;
+            }
+
+            isPlayingAudio = true;
+            const base64Audio = audioQueue.shift();
+
+            try {
+                const audioData = atob(base64Audio);
+                const arrayBuffer = new ArrayBuffer(audioData.length);
+                const view = new Uint8Array(arrayBuffer);
+
+                for (let i = 0; i < audioData.length; i++) {
+                    view[i] = audioData.charCodeAt(i);
+                }
+
+                const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+
+                audio.onended = () => {
+                    URL.revokeObjectURL(url);
+                    processAudioQueue();
+                };
+
+                audio.onerror = () => {
+                    URL.revokeObjectURL(url);
+                    processAudioQueue();
+                };
+
+                await audio.play();
+
+            } catch (error) {
+                console.error('Error playing audio:', error);
+                processAudioQueue();
+            }
+        }
+
+        recordBtn.addEventListener('click', () => {
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        connectWebSocket();
+    </script>
+</body>
+</html>
