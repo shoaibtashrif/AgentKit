@@ -148,9 +148,20 @@ class VoiceAgent {
   handleSessionEnd(sessionId) {
     console.log(`\n🔴 Session ended: ${sessionId}`);
 
+    // Clear all services for this session
     this.deepgramService.closeConnection(sessionId);
     this.openaiService.clearHistory(sessionId);
+    this.elevenlabsService.clearSession(sessionId);
+    this.twilioService.cleanupSession(sessionId);
     this.activeTranscriptions.delete(sessionId);
+
+    // Clear any pending audio for this session
+    rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
+      sessionId,
+      timestamp: Date.now()
+    });
+
+    console.log(`✓ All session data cleared for ${sessionId}`);
   }
 
   async shutdown() {

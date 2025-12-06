@@ -19,6 +19,8 @@ class TwilioService {
     this.onCallStart = null;
     this.onCallEnd = null;
     this.onAudioData = null;
+    this.audioQueues = new Map(); // Queue per session for sequential playback
+    this.processing = new Map(); // Track if session is playing audio
   }
 
   async start() {
@@ -122,6 +124,28 @@ class TwilioService {
     console.log(`✓ Twilio Media Stream WebSocket on port ${this.webhookPort}`);
   }
 
+  async processAudioQueue(sessionId) {
+    const queue = this.audioQueues.get(sessionId);
+    if (!queue || queue.length === 0) {
+      this.processing.set(sessionId, false);
+      return;
+    }
+
+    this.processing.set(sessionId, true);
+    const audio = queue.shift(); // Get next audio from queue
+
+    logger.info('Twilio', `Processing audio from queue (${queue.length} remaining)`);
+
+    await this.sendAudioToCall(sessionId, audio);
+
+    // Process next in queue
+    if (queue.length > 0) {
+      this.processAudioQueue(sessionId);
+    } else {
+      this.processing.set(sessionId, false);
+    }
+  }
+
   handleIncomingCall(req, res) {
     const twiml = new VoiceResponse();
 
@@ -151,8 +175,29 @@ class TwilioService {
   async startAudioListener() {
     await rabbitmq.consume(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, async (message) => {
       const { sessionId, audio } = message;
+
+      // Verify session still exists
+      const sessionExists = Array.from(this.activeCalls.values()).some(
+        callData => callData.sessionId === sessionId
+      );
+
+      if (!sessionExists) {
+        logger.warn('Twilio', `Ignoring audio for ended session ${sessionId}`);
+        return;
+      }
+
+      // Add to session queue
+      if (!this.audioQueues.has(sessionId)) {
+        this.audioQueues.set(sessionId, []);
+      }
+      this.audioQueues.get(sessionId).push(audio);
+
       logger.audio('Twilio', `Received ${audio.length} bytes for session ${sessionId}`);
-      this.sendAudioToCall(sessionId, audio);
+
+      // Process queue if not already processing
+      if (!this.processing.get(sessionId)) {
+        this.processAudioQueue(sessionId);
+      }
     });
 
     // Listen for audio clearing (interruption handling)
@@ -283,44 +328,54 @@ class TwilioService {
   }
 
   sendAudioToCall(sessionId, audioData) {
-    for (const [callSid, callData] of this.activeCalls) {
-      if (callData.sessionId === sessionId) {
-        const ws = callData.ws;
+    return new Promise((resolve) => {
+      for (const [callSid, callData] of this.activeCalls) {
+        if (callData.sessionId === sessionId) {
+          const ws = callData.ws;
 
-        if (ws && ws.readyState === ws.OPEN) {
-          try {
-            // audioData is already μ-law from ElevenLabs - use directly!
-            const mulawBuffer = Buffer.from(audioData);
+          if (ws && ws.readyState === ws.OPEN) {
+            try {
+              // audioData is already μ-law from ElevenLabs - use directly!
+              const mulawBuffer = Buffer.from(audioData);
 
-            if (mulawBuffer.length === 0) {
-              logger.warn('Twilio', 'Empty audio buffer received');
-              return;
-            }
+              if (mulawBuffer.length === 0) {
+                logger.warn('Twilio', 'Empty audio buffer received');
+                resolve();
+                return;
+              }
 
-            // Store audio chunks for interruption handling
-            if (!callData.audioChunks) {
-              callData.audioChunks = [];
-            }
+              // Store audio chunks for interruption handling
+              if (!callData.audioChunks) {
+                callData.audioChunks = [];
+              }
 
-            // For shorter audio (< 20k bytes), add initial buffer delay to prevent distortion
-            const isShortAudio = mulawBuffer.length < 20000;
-            const initialDelay = isShortAudio ? 50 : 0; // 50ms buffer for short audio
+              // Calculate total playback duration upfront
+              // μ-law at 8kHz: 1 byte = 1 sample, 8000 samples/sec
+              const totalDurationMs = (mulawBuffer.length / 8000) * 1000;
 
-            logger.success('Twilio', `Sending ${mulawBuffer.length}B μ-law${isShortAudio ? ' (short, buffering)' : ''}`);
+              logger.success('Twilio', `Sending ${mulawBuffer.length}B μ-law (${Math.round(totalDurationMs)}ms duration)`);
 
-            // Send in larger chunks for better stability (320 bytes = 40ms at 8kHz)
-            const chunkSize = 320;
+              // Start playback timer immediately (audio plays as soon as first chunk arrives)
+              const playbackTimer = setTimeout(() => {
+                logger.info('Twilio', `Playback completed for ${mulawBuffer.length} bytes`);
+                resolve();
+              }, totalDurationMs);
+
+            // Use smaller chunks like working project (108 bytes)
+            const chunkSize = 108;
             let chunkIndex = 0;
-            let chunksSent = 0;
+            let chunksInFlight = 0; // Track pending chunks for backpressure
 
             const sendChunk = () => {
               // Check if audio was cleared (interrupted)
               if (callData.audioCleared) {
+                clearTimeout(playbackTimer);
+                resolve();
                 return;
               }
 
               if (chunkIndex >= mulawBuffer.length) {
-                // Clear chunks when done
+                // All chunks sent, timer will handle resolution
                 callData.audioChunks = [];
                 return;
               }
@@ -335,35 +390,49 @@ class TwilioService {
               }));
 
               chunkIndex += chunkSize;
-              chunksSent++;
+              chunksInFlight++;
 
-              // Schedule next chunk with adaptive timing
+              // CRITICAL: Backpressure like working project
+              // Slow down if too many chunks are buffered
+              let delay = 13; // Base delay ~13ms per 108-byte chunk at 8kHz
+
+              if (chunksInFlight > 40) {
+                // Too many pending, slow way down
+                delay = 28; // ~15ms extra
+                logger.warn('Twilio', `High buffer (${chunksInFlight}), applying backpressure`);
+              } else if (chunksInFlight > 25) {
+                // Getting full, slow down a bit
+                delay = 21; // ~8ms extra
+              }
+
+              // Decrease in-flight count after chunk plays
+              setTimeout(() => {
+                chunksInFlight = Math.max(0, chunksInFlight - 1);
+              }, delay);
+
+              // Schedule next chunk
               if (chunkIndex < mulawBuffer.length) {
-                // 40ms base delay for 320-byte chunks, with slight backpressure for queue buildup
-                let delay = 40;
-
-                // Add small backpressure delay if sending too fast
-                if (chunksSent > 10 && chunksSent % 5 === 0) {
-                  delay += 5; // Slight slowdown every 5 chunks after first 10
-                }
-
                 const timeoutId = setTimeout(sendChunk, delay);
                 callData.audioChunks.push(timeoutId);
               }
             };
 
-            // Start sending after initial buffer delay
-            setTimeout(sendChunk, initialDelay);
-          } catch (error) {
-            logger.error('Twilio', 'Error sending audio', { error: error.message, stack: error.stack });
+            // Start sending immediately
+            sendChunk();
+            } catch (error) {
+              logger.error('Twilio', 'Error sending audio', { error: error.message, stack: error.stack });
+              resolve();
+            }
+          } else {
+            logger.warn('Twilio', 'WebSocket is not open');
+            resolve();
           }
-        } else {
-          logger.warn('Twilio', 'WebSocket is not open');
+          return;
         }
-        return;
       }
-    }
-    logger.warn('Twilio', `No call found for session ${sessionId}`);
+      logger.warn('Twilio', `No call found for session ${sessionId}`);
+      resolve();
+    });
   }
 
   clearAudioForSession(sessionId) {
@@ -371,7 +440,7 @@ class TwilioService {
       if (callData.sessionId === sessionId) {
         // Mark audio as cleared
         callData.audioCleared = true;
-        
+
         // Clear any pending audio chunks
         if (callData.audioChunks) {
           callData.audioChunks.forEach(timeoutId => clearTimeout(timeoutId));
@@ -388,12 +457,31 @@ class TwilioService {
         }
 
         console.log(`[AUDIO-OUT] ✓ Cleared audio for session ${sessionId}`);
-        
+
         // Reset the flag after a short delay
         setTimeout(() => {
           callData.audioCleared = false;
         }, 100);
-        
+
+        return;
+      }
+    }
+  }
+
+  cleanupSession(sessionId) {
+    for (const [callSid, callData] of this.activeCalls) {
+      if (callData.sessionId === sessionId) {
+        // Clear any pending audio
+        this.clearAudioForSession(sessionId);
+
+        // Clear audio queue
+        this.audioQueues.delete(sessionId);
+        this.processing.delete(sessionId);
+
+        // Remove from active calls
+        this.activeCalls.delete(callSid);
+
+        console.log(`[Twilio] Session ${sessionId} cleaned up`);
         return;
       }
     }

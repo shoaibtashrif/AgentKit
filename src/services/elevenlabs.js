@@ -6,14 +6,47 @@ class ElevenLabsService {
   constructor(apiKey, voiceId) {
     this.apiKey = apiKey;
     this.voiceId = voiceId;
+    this.sessionQueues = new Map(); // Queue per session to prevent overlap
+    this.processing = new Map(); // Track which sessions are processing
+    this.activeWebSockets = new Map(); // Track active WebSocket per session
   }
 
   async startListening() {
     await rabbitmq.consume(rabbitmq.queues.TTS_REQUEST, async (message) => {
       const { sessionId, text } = message;
-      await this.synthesize(sessionId, text);
+
+      // Add to session queue
+      if (!this.sessionQueues.has(sessionId)) {
+        this.sessionQueues.set(sessionId, []);
+      }
+      this.sessionQueues.get(sessionId).push(text);
+
+      // Process queue if not already processing
+      if (!this.processing.get(sessionId)) {
+        this.processQueue(sessionId);
+      }
     });
     logger.success('ElevenLabs', 'Service listening for TTS requests');
+  }
+
+  async processQueue(sessionId) {
+    const queue = this.sessionQueues.get(sessionId);
+    if (!queue || queue.length === 0) {
+      this.processing.set(sessionId, false);
+      return;
+    }
+
+    this.processing.set(sessionId, true);
+    const text = queue.shift(); // Get next text from queue
+
+    await this.synthesize(sessionId, text);
+
+    // Process next in queue
+    if (queue.length > 0) {
+      this.processQueue(sessionId);
+    } else {
+      this.processing.set(sessionId, false);
+    }
   }
 
   async synthesize(sessionId, text) {
@@ -82,10 +115,12 @@ class ElevenLabsService {
               await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, message);
               await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_WS, message);
 
-              logger.success('ElevenLabs', `Audio sent to queues for session ${sessionId}`);
+              logger.success('ElevenLabs', `Audio queued for session ${sessionId}`);
 
               ws.close();
-              resolve();
+
+              // Wait a bit to ensure audio is sent before resolving
+              setTimeout(() => resolve(), 100);
             }
           } catch (error) {
             logger.error('ElevenLabs', 'Error processing WebSocket message', { error: error.message });
@@ -114,6 +149,23 @@ class ElevenLabsService {
         reject(error);
       }
     });
+  }
+
+  clearSession(sessionId) {
+    // Stop processing for this session
+    this.processing.delete(sessionId);
+
+    // Clear the queue
+    this.sessionQueues.delete(sessionId);
+
+    // Close any active WebSocket
+    const ws = this.activeWebSockets.get(sessionId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
+    this.activeWebSockets.delete(sessionId);
+
+    logger.info('ElevenLabs', `Session ${sessionId} cleared`);
   }
 }
 
