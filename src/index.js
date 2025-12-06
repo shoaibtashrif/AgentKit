@@ -88,7 +88,10 @@ class VoiceAgent {
     await rabbitmq.consume(rabbitmq.queues.TRANSCRIPTION, async (message) => {
       const { sessionId, transcript } = message;
 
+      // Stop all generation immediately on user interruption
       this.openaiService.stopGeneration(sessionId);
+      this.elevenlabsService.stopGeneration(sessionId);
+
       await rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
         sessionId,
         timestamp: Date.now()
