@@ -174,7 +174,7 @@ class TwilioService {
 
   async startAudioListener() {
     await rabbitmq.consume(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, async (message) => {
-      const { sessionId, audio } = message;
+      const { sessionId, audio, streaming, endOfSentence } = message;
 
       // Verify session still exists
       const sessionExists = Array.from(this.activeCalls.values()).some(
@@ -186,17 +186,21 @@ class TwilioService {
         return;
       }
 
-      // Add to session queue
-      if (!this.audioQueues.has(sessionId)) {
-        this.audioQueues.set(sessionId, []);
-      }
-      this.audioQueues.get(sessionId).push(audio);
+      // Handle streaming chunks
+      if (streaming && audio.length > 0) {
+        // Add chunk to session queue
+        if (!this.audioQueues.has(sessionId)) {
+          this.audioQueues.set(sessionId, []);
+        }
+        this.audioQueues.get(sessionId).push(audio);
 
-      logger.audio('Twilio', `Received ${audio.length} bytes for session ${sessionId}`);
-
-      // Process queue if not already processing
-      if (!this.processing.get(sessionId)) {
-        this.processAudioQueue(sessionId);
+        // Start processing if not already
+        if (!this.processing.get(sessionId)) {
+          this.processAudioQueue(sessionId);
+        }
+      } else if (endOfSentence) {
+        // Mark end of current sentence
+        logger.info('Twilio', `End of sentence marker for session ${sessionId}`);
       }
     });
 
@@ -356,8 +360,9 @@ class TwilioService {
               logger.success('Twilio', `Sending ${mulawBuffer.length}B μ-law (${Math.round(totalDurationMs)}ms duration)`);
 
               // Start playback timer immediately (audio plays as soon as first chunk arrives)
-              const playbackTimer = setTimeout(() => {
+              callData.playbackTimer = setTimeout(() => {
                 logger.info('Twilio', `Playback completed for ${mulawBuffer.length} bytes`);
+                callData.playbackTimer = null;
                 resolve();
               }, totalDurationMs);
 
@@ -369,7 +374,10 @@ class TwilioService {
             const sendChunk = () => {
               // Check if audio was cleared (interrupted)
               if (callData.audioCleared) {
-                clearTimeout(playbackTimer);
+                if (callData.playbackTimer) {
+                  clearTimeout(callData.playbackTimer);
+                  callData.playbackTimer = null;
+                }
                 resolve();
                 return;
               }
@@ -447,6 +455,20 @@ class TwilioService {
           callData.audioChunks = [];
         }
 
+        // Clear the audio queue immediately
+        if (this.audioQueues.has(sessionId)) {
+          this.audioQueues.set(sessionId, []);
+        }
+
+        // Stop processing flag
+        this.processing.set(sessionId, false);
+
+        // Clear any active playback timer
+        if (callData.playbackTimer) {
+          clearTimeout(callData.playbackTimer);
+          callData.playbackTimer = null;
+        }
+
         // Send clear command to Twilio to stop current audio
         const ws = callData.ws;
         if (ws && ws.readyState === ws.OPEN) {
@@ -456,12 +478,12 @@ class TwilioService {
           }));
         }
 
-        console.log(`[AUDIO-OUT] ✓ Cleared audio for session ${sessionId}`);
+        logger.warn('Twilio', `🛑 Interruption: Cleared all audio for session ${sessionId}`);
 
         // Reset the flag after a short delay
         setTimeout(() => {
           callData.audioCleared = false;
-        }, 100);
+        }, 50); // Reduced from 100ms to 50ms
 
         return;
       }

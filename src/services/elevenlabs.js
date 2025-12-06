@@ -91,31 +91,39 @@ class ElevenLabsService {
           try {
             const response = JSON.parse(data.toString());
 
-            // Handle audio chunks
+            // Handle audio chunks - stream immediately!
             if (response.audio) {
               // Audio comes as base64 encoded μ-law
               const audioBuffer = Buffer.from(response.audio, 'base64');
               audioChunks.push(audioBuffer);
               totalBytes += audioBuffer.length;
-            }
 
-            // Handle completion
-            if (response.isFinal) {
-              logger.success('ElevenLabs', `Generated ${totalBytes} bytes μ-law audio (streaming)`);
-
-              // Combine all chunks
-              const completeAudio = Buffer.concat(audioChunks);
-
+              // Stream chunk immediately to Twilio (don't wait for isFinal)
               const message = {
                 sessionId,
-                audio: Array.from(completeAudio),
-                timestamp: Date.now()
+                audio: Array.from(audioBuffer),
+                timestamp: Date.now(),
+                streaming: true // Mark as streaming chunk
               };
 
               await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, message);
               await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_WS, message);
+            }
 
-              logger.success('ElevenLabs', `Audio queued for session ${sessionId}`);
+            // Handle completion
+            if (response.isFinal) {
+              logger.success('ElevenLabs', `Streamed ${totalBytes} bytes μ-law audio in ${audioChunks.length} chunks`);
+
+              // Send end-of-sentence marker
+              const endMessage = {
+                sessionId,
+                audio: [],
+                timestamp: Date.now(),
+                streaming: false,
+                endOfSentence: true
+              };
+
+              await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, endMessage);
 
               ws.close();
 

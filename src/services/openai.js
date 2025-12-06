@@ -36,7 +36,8 @@ class OpenAIService {
         messages: history,
         stream: true,
         temperature: 0.7,
-        max_tokens: 150
+        max_tokens: 150,
+        stream_options: { include_usage: false } // Reduce overhead
       });
 
       let fullResponse = '';
