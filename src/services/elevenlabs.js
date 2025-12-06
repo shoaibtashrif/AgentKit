@@ -1,10 +1,11 @@
+import WebSocket from 'ws';
 import rabbitmq from '../config/rabbitmq.js';
+import logger from '../utils/logger.js';
 
 class ElevenLabsService {
   constructor(apiKey, voiceId) {
     this.apiKey = apiKey;
     this.voiceId = voiceId;
-    this.baseUrl = 'https://api.elevenlabs.io/v1';
   }
 
   async startListening() {
@@ -12,56 +13,107 @@ class ElevenLabsService {
       const { sessionId, text } = message;
       await this.synthesize(sessionId, text);
     });
-    console.log('✓ ElevenLabs service listening for TTS requests');
+    logger.success('ElevenLabs', 'Service listening for TTS requests');
   }
 
   async synthesize(sessionId, text) {
-    try {
-      console.log(`[ElevenLabs] Synthesizing: ${text}`);
+    return new Promise((resolve, reject) => {
+      try {
+        logger.info('ElevenLabs', `Synthesizing: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
 
-      const response = await fetch(
-        `${this.baseUrl}/text-to-speech/${this.voiceId}/stream`,
-        {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/mpeg',
-            'Content-Type': 'application/json',
-            'xi-api-key': this.apiKey
-          },
-          body: JSON.stringify({
-            text,
-            model_id: 'eleven_turbo_v2_5',
+        // WebSocket streaming endpoint (like working project)
+        const wsUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream-input?model_id=eleven_turbo_v2_5&output_format=ulaw_8000`;
+
+        const ws = new WebSocket(wsUrl);
+        const audioChunks = [];
+        let totalBytes = 0;
+
+        ws.on('open', () => {
+          logger.info('ElevenLabs', 'WebSocket connected');
+
+          // Send initial configuration (required by ElevenLabs)
+          const initMessage = {
+            text: ' ',
             voice_settings: {
               stability: 0.5,
               similarity_boost: 0.75,
               style: 0.0,
               use_speaker_boost: true
             },
-            output_format: 'pcm_16000'
-          })
-        }
-      );
+            xi_api_key: this.apiKey
+          };
+          ws.send(JSON.stringify(initMessage));
 
-      if (!response.ok) {
-        throw new Error(`ElevenLabs API error: ${response.statusText}`);
+          // Send the actual text with flush
+          ws.send(JSON.stringify({
+            text: text,
+            flush: true
+          }));
+
+          // Send empty text to signal end
+          ws.send(JSON.stringify({ text: '' }));
+        });
+
+        ws.on('message', async (data) => {
+          try {
+            const response = JSON.parse(data.toString());
+
+            // Handle audio chunks
+            if (response.audio) {
+              // Audio comes as base64 encoded μ-law
+              const audioBuffer = Buffer.from(response.audio, 'base64');
+              audioChunks.push(audioBuffer);
+              totalBytes += audioBuffer.length;
+            }
+
+            // Handle completion
+            if (response.isFinal) {
+              logger.success('ElevenLabs', `Generated ${totalBytes} bytes μ-law audio (streaming)`);
+
+              // Combine all chunks
+              const completeAudio = Buffer.concat(audioChunks);
+
+              const message = {
+                sessionId,
+                audio: Array.from(completeAudio),
+                timestamp: Date.now()
+              };
+
+              await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, message);
+              await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_WS, message);
+
+              logger.success('ElevenLabs', `Audio sent to queues for session ${sessionId}`);
+
+              ws.close();
+              resolve();
+            }
+          } catch (error) {
+            logger.error('ElevenLabs', 'Error processing WebSocket message', { error: error.message });
+          }
+        });
+
+        ws.on('error', (error) => {
+          logger.error('ElevenLabs', 'WebSocket error', { error: error.message });
+          reject(error);
+        });
+
+        ws.on('close', () => {
+          logger.info('ElevenLabs', 'WebSocket closed');
+        });
+
+        // Timeout after 30 seconds
+        setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.close();
+            reject(new Error('ElevenLabs WebSocket timeout'));
+          }
+        }, 30000);
+
+      } catch (error) {
+        logger.error('ElevenLabs', 'Synthesis error', { error: error.message });
+        reject(error);
       }
-
-      const audioBuffer = await response.arrayBuffer();
-
-      const message = {
-        sessionId,
-        audio: Array.from(new Uint8Array(audioBuffer)),
-        timestamp: Date.now()
-      };
-
-      await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_TWILIO, message);
-      await rabbitmq.publish(rabbitmq.queues.AUDIO_OUTPUT_WS, message);
-
-      console.log(`[ElevenLabs] Audio generated and sent to queues`);
-
-    } catch (error) {
-      console.error('ElevenLabs synthesis error:', error);
-    }
+    });
   }
 }
 

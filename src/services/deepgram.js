@@ -1,5 +1,6 @@
 import { createClient } from '@deepgram/sdk';
 import rabbitmq from '../config/rabbitmq.js';
+import logger from '../utils/logger.js';
 
 class DeepgramService {
   constructor(apiKey) {
@@ -9,55 +10,86 @@ class DeepgramService {
 
   async startTranscription(sessionId, onTranscript, sampleRate = 16000) {
     try {
+      logger.info('Deepgram', `Starting connection @ ${sampleRate}Hz for session ${sessionId}`);
+
       const connection = this.client.listen.live({
         model: 'nova-2',
         encoding: 'linear16',
         sample_rate: sampleRate,
-        channels: 1
+        channels: 1,
+        interim_results: true,
+        smart_format: true,
+        punctuate: true
       });
 
-      connection.on('open', () => {
-        console.log(`✓ Deepgram connection opened for session: ${sessionId}`);
+      // Wait for connection to open before proceeding
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Deepgram connection timeout'));
+        }, 10000);
+
+        connection.on('open', () => {
+          clearTimeout(timeout);
+          logger.success('Deepgram', `Connection opened for session ${sessionId} @ ${sampleRate}Hz`);
+          resolve();
+        });
+
+        connection.on('error', (error) => {
+          clearTimeout(timeout);
+          logger.error('Deepgram', `Connection error for session ${sessionId}`, { error: error.message || error });
+          this.connections.delete(sessionId);
+          reject(error);
+        });
       });
+
+      let lastInterruptTime = 0;
 
       connection.on('Results', async (data) => {
-        console.log(`[Deepgram] RAW Results event for session ${sessionId}:`, JSON.stringify(data, null, 2));
-
         const transcript = data.channel?.alternatives?.[0]?.transcript;
         const isFinal = data.is_final;
+        const speechFinal = data.speech_final;
 
-        console.log(`[Deepgram] Extracted - Transcript: "${transcript}", is_final: ${isFinal}`);
-
-        if (transcript && transcript.trim().length > 0) {
-          console.log(`[Deepgram] Valid transcript detected: "${transcript}" (is_final: ${isFinal})`);
-
-          if (isFinal) {
-            console.log(`[Deepgram] Publishing final transcript to RabbitMQ: "${transcript}"`);
-
-            const message = {
+        // Handle interruption - if user starts speaking, stop current audio
+        // Only interrupt once per 500ms to avoid excessive clearing
+        if (transcript && transcript.trim().length > 0 && !isFinal) {
+          const now = Date.now();
+          if (now - lastInterruptTime > 500) {
+            logger.info('Deepgram', `User interruption detected: "${transcript}"`);
+            await rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
               sessionId,
-              transcript,
-              timestamp: Date.now(),
-              is_final: isFinal
-            };
-
-            await rabbitmq.publish(rabbitmq.queues.TRANSCRIPTION, message);
-
-            if (onTranscript) {
-              onTranscript(transcript);
-            }
+              timestamp: now
+            });
+            lastInterruptTime = now;
           }
-        } else {
-          console.log(`[Deepgram] Empty or invalid transcript - skipping`);
+        }
+
+        if (transcript && transcript.trim().length > 0 && isFinal) {
+          logger.success('Deepgram', `Transcript: "${transcript}"`);
+
+          const message = {
+            sessionId,
+            transcript,
+            timestamp: Date.now(),
+            is_final: isFinal
+          };
+
+          await rabbitmq.publish(rabbitmq.queues.TRANSCRIPTION, message);
+
+          if (onTranscript) {
+            onTranscript(transcript);
+          }
         }
       });
 
+
+
       connection.on('error', (error) => {
-        console.error('Deepgram error:', error);
+        logger.error('Deepgram', `Error for session ${sessionId}`, { error: error.message || error });
+        this.connections.delete(sessionId);
       });
 
       connection.on('close', () => {
-        console.log(`Deepgram connection closed for session: ${sessionId}`);
+        logger.info('Deepgram', `Connection closed for session ${sessionId}`);
         this.connections.delete(sessionId);
       });
 
@@ -65,7 +97,7 @@ class DeepgramService {
 
       return connection;
     } catch (error) {
-      console.error('Failed to start Deepgram transcription:', error);
+      logger.error('Deepgram', 'Failed to start transcription', { error: error.message });
       throw error;
     }
   }
@@ -73,10 +105,10 @@ class DeepgramService {
   sendAudio(sessionId, audioData) {
     const connection = this.connections.get(sessionId);
     if (connection) {
-      console.log(`[Deepgram] Sending ${audioData.length} bytes of audio for session ${sessionId}`);
+      // Don't log every audio chunk - too verbose
       connection.send(audioData);
     } else {
-      console.error(`No Deepgram connection found for session: ${sessionId}`);
+      logger.warn('Deepgram', `No connection found for session ${sessionId}`);
     }
   }
 
