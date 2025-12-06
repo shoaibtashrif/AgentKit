@@ -16,7 +16,7 @@ class VoiceAgent {
       process.env.ELEVENLABS_API_KEY,
       process.env.ELEVENLABS_VOICE_ID
     );
-    this.wsServer = new VoiceWebSocketServer(3000);
+    this.wsServer = new VoiceWebSocketServer(3001);
     this.twilioService = new TwilioService(
       process.env.TWILIO_ACCOUNT_SID,
       process.env.TWILIO_AUTH_TOKEN,
@@ -54,9 +54,10 @@ class VoiceAgent {
       this.twilioService.onCallStart = async (sessionId, callSid) => {
         this.handleTwilioSessionStart(sessionId);
 
+        // Send initial greeting
         await rabbitmq.publish(rabbitmq.queues.LLM_REQUEST, {
           sessionId,
-          transcript: 'Hello',
+          transcript: 'Hello! How can I help you today?',
           timestamp: Date.now()
         });
       };
@@ -72,9 +73,9 @@ class VoiceAgent {
       await this.twilioService.start();
 
       console.log('\n✅ Voice Agent is ready!\n');
-      console.log('📡 WebSocket server: ws://localhost:3000');
+      console.log('📡 WebSocket server: ws://localhost:3001');
       console.log('📞 Twilio webhook: http://localhost:8081/voice');
-      console.log('📞 Twilio Media Stream: ws://localhost:8082');
+      console.log('📞 Twilio Media Stream: ws://localhost:8081');
       console.log('🎤 Ready for calls and browser connections\n');
 
     } catch (error) {
@@ -106,15 +107,22 @@ class VoiceAgent {
   async handleSessionStart(sessionId) {
     console.log(`\n🟢 Session started: ${sessionId}`);
 
-    const connection = await this.deepgramService.startTranscription(
-      sessionId,
-      (transcript) => {
-        console.log(`[${sessionId}] User: ${transcript}`);
-      },
-      16000
-    );
+    try {
+      // Use 16kHz for Deepgram (we'll upsample the 8kHz Twilio audio)
+      const connection = await this.deepgramService.startTranscription(
+        sessionId,
+        (transcript) => {
+          console.log(`[${sessionId}] User: ${transcript}`);
+        },
+        16000
+      );
 
-    this.activeTranscriptions.set(sessionId, connection);
+      this.activeTranscriptions.set(sessionId, connection);
+      console.log(`✓ Deepgram connection opened for session: ${sessionId} (${16000}Hz)`);
+    } catch (error) {
+      console.error(`✗ Failed to start Deepgram for session ${sessionId}:`, error.message || error);
+      // Continue without Deepgram - the system can still work for outbound audio
+    }
   }
 
   async handleTwilioSessionStart(sessionId) {
@@ -132,15 +140,28 @@ class VoiceAgent {
   }
 
   handleAudioData(sessionId, audioData) {
+    // audioData is PCM 16-bit at 8kHz from Twilio service
+    // Send directly to Deepgram (already configured for 8kHz)
     this.deepgramService.sendAudio(sessionId, audioData);
   }
 
   handleSessionEnd(sessionId) {
     console.log(`\n🔴 Session ended: ${sessionId}`);
 
+    // Clear all services for this session
     this.deepgramService.closeConnection(sessionId);
     this.openaiService.clearHistory(sessionId);
+    this.elevenlabsService.clearSession(sessionId);
+    this.twilioService.cleanupSession(sessionId);
     this.activeTranscriptions.delete(sessionId);
+
+    // Clear any pending audio for this session
+    rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
+      sessionId,
+      timestamp: Date.now()
+    });
+
+    console.log(`✓ All session data cleared for ${sessionId}`);
   }
 
   async shutdown() {
