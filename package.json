@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "update-webhook": "node update-twilio-webhook.js"
+    "update-webhook": "node update-twilio-webhook.js",
+    "ingest": "node ingest-documents.js"
   },
   "keywords": [
     "voice",
@@ -19,13 +20,19 @@
   "license": "ISC",
   "dependencies": {
     "@deepgram/sdk": "^3.4.0",
+    "@langchain/community": "^0.3.58",
+    "@langchain/openai": "^0.6.16",
     "amqplib": "^0.10.3",
     "audiobuffer-to-wav": "^1.0.0",
     "dotenv": "^16.3.1",
     "elevenlabs-node": "^1.1.8",
     "express": "^4.18.2",
+    "faiss-node": "^0.5.1",
+    "hnswlib-node": "^3.0.0",
+    "langchain": "^0.3.36",
     "openai": "^4.20.1",
     "pcm-convert": "^1.6.5",
+    "pdf-parse": "^1.1.1",
     "twilio": "^4.19.0",
     "ws": "^8.14.2"
   },

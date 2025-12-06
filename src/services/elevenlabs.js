@@ -61,6 +61,9 @@ class ElevenLabsService {
         const audioChunks = [];
         let totalBytes = 0;
 
+        // Store active WebSocket for this session
+        this.activeWebSockets.set(sessionId, ws);
+
         ws.on('open', () => {
           logger.info('ElevenLabs', 'WebSocket connected');
 
@@ -142,6 +145,10 @@ class ElevenLabsService {
 
         ws.on('close', () => {
           logger.info('ElevenLabs', 'WebSocket closed');
+          // Remove from active WebSockets
+          if (this.activeWebSockets.get(sessionId) === ws) {
+            this.activeWebSockets.delete(sessionId);
+          }
         });
 
         // Timeout after 30 seconds
@@ -159,19 +166,31 @@ class ElevenLabsService {
     });
   }
 
-  clearSession(sessionId) {
-    // Stop processing for this session
-    this.processing.delete(sessionId);
+  stopGeneration(sessionId) {
+    // Stop processing immediately
+    this.processing.set(sessionId, false);
 
     // Clear the queue
-    this.sessionQueues.delete(sessionId);
+    if (this.sessionQueues.has(sessionId)) {
+      this.sessionQueues.set(sessionId, []);
+    }
 
-    // Close any active WebSocket
+    // Close any active WebSocket immediately
     const ws = this.activeWebSockets.get(sessionId);
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
+      logger.warn('ElevenLabs', `🛑 Stopped generation for session ${sessionId}`);
     }
     this.activeWebSockets.delete(sessionId);
+  }
+
+  clearSession(sessionId) {
+    // Stop any active generation
+    this.stopGeneration(sessionId);
+
+    // Remove all session data
+    this.processing.delete(sessionId);
+    this.sessionQueues.delete(sessionId);
 
     logger.info('ElevenLabs', `Session ${sessionId} cleared`);
   }

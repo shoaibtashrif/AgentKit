@@ -1,15 +1,31 @@
 import OpenAI from 'openai';
 import rabbitmq from '../config/rabbitmq.js';
+import RAGService from './rag.js';
 
 class OpenAIService {
   constructor(apiKey) {
     this.client = new OpenAI({ apiKey });
     this.conversationHistory = new Map();
     this.activeGenerations = new Map();
-    this.systemPrompt = `You are a helpful voice assistant. Keep your responses concise and natural for spoken conversation. Respond in 1-3 sentences unless more detail is specifically requested.`;
+    this.ragService = new RAGService(apiKey);
+    this.systemPrompt = `You are a helpful voice assistant for Northview Pain Management Center. Keep your responses concise and natural for spoken conversation. Respond in 1-3 sentences unless more detail is specifically requested.
+
+When answering questions:
+- Use the provided context from our knowledge base when available
+- If the context doesn't contain the answer, politely say you don't have that specific information
+- Be helpful, professional, and empathetic
+- For appointment scheduling, insurance questions, or specific medical concerns, suggest calling the office at (555) 123-4567`;
   }
 
   async startListening() {
+    // Initialize RAG service
+    const ragInitialized = await this.ragService.initialize();
+    if (ragInitialized) {
+      console.log('✓ RAG service initialized');
+    } else {
+      console.log('⚠ RAG service not initialized - run document ingestion first');
+    }
+
     await rabbitmq.consume(rabbitmq.queues.LLM_REQUEST, async (message) => {
       const { sessionId, transcript } = message;
       await this.processMessage(sessionId, transcript);
@@ -25,9 +41,26 @@ class OpenAIService {
         this.conversationHistory.set(sessionId, history);
       }
 
-      history.push({ role: 'user', content: userMessage });
-
       console.log(`[OpenAI] Processing: ${userMessage}`);
+
+      // Query RAG for relevant context (only 1 doc for speed)
+      let contextualMessage = userMessage;
+      if (this.ragService.isRelevantQuery(userMessage)) {
+        const ragResult = await this.ragService.query(userMessage, 1);
+
+        if (ragResult.hasContext) {
+          console.log(`[OpenAI] Using RAG context (1 source for speed)`);
+
+          // Concise context format to reduce tokens
+          contextualMessage = `Context: ${ragResult.context.substring(0, 400)}...\n\nQ: ${userMessage}`;
+        } else {
+          console.log(`[OpenAI] No RAG context found, using general LLM`);
+        }
+      } else {
+        console.log(`[OpenAI] Query not relevant to knowledge base, using general LLM`);
+      }
+
+      history.push({ role: 'user', content: contextualMessage });
 
       this.activeGenerations.set(sessionId, true);
 

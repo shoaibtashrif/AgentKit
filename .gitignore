@@ -3,7 +3,6 @@ node_modules/
 *.log
 .DS_Store
 junk/
-.env
 __pycache__/
 .idea/
 venv/
@@ -14,3 +13,6 @@ codedump.txt
 .vscode/
 claude
 vscode
+
+# RAG - Exclude generated vector store but keep documents
+data/vectorstore/
