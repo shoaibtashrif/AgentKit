@@ -1,10 +1,10 @@
-# Docker Setup Guide for Voice Agent
+# Docker Setup Guide - Voice Agent
 
-This guide helps you deploy the entire voice agent system using Docker Compose with a single command.
+Complete Docker setup that includes **everything** you need. No external dependencies required!
 
 ## What's Included
 
-The Docker setup includes:
+All services run in Docker containers:
 - **RabbitMQ** - Message queue for async processing
 - **Ollama** - Local LLM service with qwen2.5:0.5b model (CPU-optimized)
 - **Voice Agent App** - The main Node.js application
@@ -19,274 +19,288 @@ The Docker setup includes:
 
 ## Quick Start
 
-### 1. Clone and Navigate to Project
+### 1. Navigate to Project
 
 ```bash
 cd /path/to/AgentKit
 ```
 
-### 2. Create Environment File
+### 2. Ensure .env File Exists
 
-Create a `.env` file in the root directory with your API keys:
-
-```bash
-# Copy the template
-cp .env.example .env
-
-# Edit with your actual API keys
-nano .env
-```
-
-Required environment variables:
+Your `.env` file should contain:
 
 ```env
-# Deepgram API (Speech-to-Text)
-DEEPGRAM_API_KEY=your_deepgram_api_key_here
-
-# OpenAI API (Optional - only if not using Ollama)
-OPENAI_API_KEY=your_openai_api_key_here
-
-# ElevenLabs API (Text-to-Speech)
-ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
-ELEVENLABS_VOICE_ID=your_elevenlabs_voice_id_here
-
-# Twilio (Phone Integration)
-TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
-TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
-TWILIO_PHONE_NUMBER=your_twilio_phone_number_here
-
-# RabbitMQ (automatically configured in Docker)
-RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+# Required API Keys
+DEEPGRAM_API_KEY=your_deepgram_api_key
+ELEVENLABS_API_KEY=your_elevenlabs_api_key
+ELEVENLABS_VOICE_ID=your_voice_id
+TWILIO_ACCOUNT_SID=your_twilio_sid
+TWILIO_AUTH_TOKEN=your_twilio_token
+TWILIO_PHONE_NUMBER=your_twilio_phone
 ```
 
 ### 3. Add Your Documents
 
-Place your knowledge base documents in the `data/documents/` directory:
+Place your knowledge base documents in `data/documents/`:
 
 ```bash
 mkdir -p data/documents
-cp your-knowledge-base/*.txt data/documents/
+cp your-knowledge-base/* data/documents/
 ```
 
-### 4. Start All Services
+### 4. Start Everything
 
-Run the following command to start everything:
+**Option A - Using the script (recommended):**
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+./docker-start.sh
 ```
 
-This will:
-- Pull all required Docker images
-- Start RabbitMQ, Ollama, and the Voice Agent
-- Download the qwen2.5:0.5b model (first run only, ~300MB)
-- Build and start the application
-
-### 5. Monitor Initial Setup
-
-Watch the logs to see progress:
+**Option B - Manual start:**
 
 ```bash
-# View all logs
-docker compose -f docker-compose.prod.yml logs -f
-
-# View specific service logs
-docker compose -f docker-compose.prod.yml logs -f voice-agent
-docker compose -f docker-compose.prod.yml logs -f ollama
+docker compose up -d
 ```
 
-**First startup takes 5-10 minutes** as it downloads the Ollama model and builds embeddings.
+That's it! Everything will start automatically.
 
-### 6. Verify Services
+## What Happens on First Run
 
-Check that all services are running:
+1. **Downloads Images** (~2 minutes)
+   - RabbitMQ image (~50MB)
+   - Ollama image (~500MB)
+   - Builds Voice Agent image
+
+2. **Downloads Model** (~5 minutes)
+   - Ollama downloads qwen2.5:0.5b (~300MB)
+   - Only happens on first run
+
+3. **Starts Services** (~1 minute)
+   - RabbitMQ starts
+   - Ollama starts
+   - Voice Agent initializes and auto-ingests documents
+
+**Total first-run time: ~8-10 minutes**
+**Subsequent starts: ~30 seconds**
+
+## Service Access
+
+Once running:
+
+- **Voice Agent**
+  - WebSocket: `ws://localhost:3001`
+  - Twilio Webhook: `http://localhost:8081/voice`
+  - Twilio Media Stream: `ws://localhost:8081`
+
+- **RabbitMQ**
+  - AMQP: `localhost:5672`
+  - Management UI: `http://localhost:15672` (guest/guest)
+
+- **Ollama**
+  - API: `http://localhost:11434`
+  - Model: qwen2.5:0.5b
+
+## Common Commands
+
+### View Logs
 
 ```bash
-docker compose -f docker-compose.prod.yml ps
+# All services
+docker compose logs -f
+
+# Specific service
+docker compose logs -f voice-agent
+docker compose logs -f ollama
+docker compose logs -f rabbitmq
 ```
 
-You should see:
-- ✅ `voice-agent-rabbitmq` - healthy
-- ✅ `voice-agent-ollama` - healthy
-- ✅ `voice-agent-app` - healthy
-- ✅ `voice-agent-ollama-init` - exited (completed)
-
-### 7. Test the Application
-
-The application is now available at:
-- **WebSocket Server**: `ws://localhost:3001`
-- **Twilio Webhook**: `http://localhost:8081/voice`
-- **RabbitMQ Management UI**: `http://localhost:15672` (guest/guest)
-
-## Usage
-
-### Ingesting Documents
-
-If you add new documents to `data/documents/`, rebuild the embeddings:
+### Check Status
 
 ```bash
-# Enter the container
-docker exec -it voice-agent-app /bin/sh
-
-# Run ingestion
-node ingest-documents.js
-
-# Exit container
-exit
+docker compose ps
 ```
 
-Or run it from host:
+### Stop All Services
+
+```bash
+docker compose down
+```
+
+### Restart Services
+
+```bash
+# Restart all
+docker compose restart
+
+# Restart specific service
+docker compose restart voice-agent
+```
+
+### Ingest New Documents
+
+If you add documents to `data/documents/`:
 
 ```bash
 docker exec voice-agent-app node ingest-documents.js
 ```
 
-### Viewing Logs
+Or just restart (auto-ingests if documents are newer):
 
 ```bash
-# All services
-docker compose -f docker-compose.prod.yml logs -f
-
-# Specific service
-docker compose -f docker-compose.prod.yml logs -f voice-agent
-docker compose -f docker-compose.prod.yml logs -f ollama
-docker compose -f docker-compose.prod.yml logs -f rabbitmq
+docker compose restart voice-agent
 ```
-
-### Restarting Services
-
-```bash
-# Restart all services
-docker compose -f docker-compose.prod.yml restart
-
-# Restart specific service
-docker compose -f docker-compose.prod.yml restart voice-agent
-```
-
-### Stopping Services
-
-```bash
-# Stop all services (keeps data)
-docker compose -f docker-compose.prod.yml down
-
-# Stop and remove volumes (deletes all data)
-docker compose -f docker-compose.prod.yml down -v
-```
-
-## Service Details
-
-### RabbitMQ
-- **Port**: 5672 (AMQP), 15672 (Management UI)
-- **Credentials**: guest/guest
-- **Management UI**: http://localhost:15672
-
-### Ollama
-- **Port**: 11434
-- **Model**: qwen2.5:0.5b (CPU-optimized, ~300MB)
-- **Model Storage**: Persisted in `ollama_data` volume
-
-### Voice Agent App
-- **Ports**: 3001 (WebSocket), 8081 (HTTP)
-- **Embeddings**: CPU-based Sentence Transformers
-- **Vector Store**: FAISS (persisted in `vector_data` volume)
-
-## Resource Configuration
-
-Default resource limits (can be adjusted in docker-compose.prod.yml):
-
-- **Ollama**: 4 CPU cores, 4GB RAM
-- **Voice Agent**: 2 CPU cores, 2GB RAM
-- **RabbitMQ**: Default (usually ~512MB)
-
-To adjust resources, edit the `deploy.resources` section in `docker-compose.prod.yml`.
 
 ## Troubleshooting
 
-### Container Fails to Start
+### Services Won't Start
+
+Check if ports are already in use:
 
 ```bash
-# Check logs
-docker compose -f docker-compose.prod.yml logs voice-agent
-
-# Check health status
-docker compose -f docker-compose.prod.yml ps
+lsof -i :5672   # RabbitMQ
+lsof -i :11434  # Ollama
+lsof -i :8081   # Voice Agent
+lsof -i :3001   # WebSocket
 ```
 
-### Ollama Model Not Loading
+If ports are in use, stop conflicting services:
 
 ```bash
-# Check Ollama logs
-docker compose -f docker-compose.prod.yml logs ollama
-
-# Manually pull model
-docker exec voice-agent-ollama ollama pull qwen2.5:0.5b
-
-# Verify model is available
-docker exec voice-agent-ollama ollama list
-```
-
-### RabbitMQ Connection Issues
-
-```bash
-# Check RabbitMQ status
-docker compose -f docker-compose.prod.yml exec rabbitmq rabbitmq-diagnostics status
-
-# Restart RabbitMQ
-docker compose -f docker-compose.prod.yml restart rabbitmq
-```
-
-### Application Not Responding
-
-```bash
-# Check health endpoint
-curl http://localhost:8081/health
-
-# Check if ports are accessible
-netstat -tlnp | grep -E '3001|8081'
-
-# Restart application
-docker compose -f docker-compose.prod.yml restart voice-agent
+# Kill processes on ports
+lsof -ti:5672,11434,8081,3001 | xargs kill -9
 ```
 
 ### Out of Memory
 
 If you see OOM errors:
 
-1. Increase Docker Desktop memory allocation (Settings > Resources)
-2. Reduce resource limits in `docker-compose.prod.yml`
-3. Use a smaller Ollama model (e.g., `qwen2.5:0.5b` is already the smallest)
+1. Increase Docker memory (Settings > Resources)
+2. Or reduce limits in `docker-compose.yml`:
 
-### Slow Performance
+```yaml
+ollama:
+  deploy:
+    resources:
+      limits:
+        memory: 2G  # Reduce from 4G
 
-To improve performance:
+voice-agent:
+  deploy:
+    resources:
+      limits:
+        memory: 1G  # Reduce from 2G
+```
 
-1. Ensure Docker has enough CPU cores allocated
-2. Use SSD storage for Docker volumes
-3. Reduce the number of retrieved documents in RAG (edit `src/services/ollama.js`)
+### Model Download Fails
+
+If Ollama model download fails:
+
+```bash
+# Check Ollama logs
+docker compose logs ollama-init
+
+# Manually pull model
+docker exec voice-agent-ollama ollama pull qwen2.5:0.5b
+
+# Verify model
+docker exec voice-agent-ollama ollama list
+```
+
+### Application Not Responding
+
+```bash
+# Check if all services are healthy
+docker compose ps
+
+# Check application logs
+docker compose logs voice-agent
+
+# Restart if needed
+docker compose restart voice-agent
+```
+
+### Clean Reset
+
+To completely reset everything:
+
+```bash
+# Stop and remove containers, networks, volumes
+docker compose down -v
+
+# Remove images (optional)
+docker rmi agentkit-voice-agent ollama/ollama rabbitmq:3.12-management-alpine
+
+# Start fresh
+docker compose up -d
+```
+
+## Resource Usage
+
+Default allocations:
+- **Ollama**: 4 CPU cores, 4GB RAM
+- **Voice Agent**: 2 CPU cores, 2GB RAM
+- **RabbitMQ**: ~512MB RAM (default)
+
+Minimum requirements:
+- **Total RAM**: 6-8GB
+- **CPU**: 4+ cores recommended
+- **Disk**: 10GB free space
 
 ## Production Deployment
 
-For production deployment:
+### 1. Use Environment-Specific Config
 
-1. **Use environment-specific .env files**:
-   ```bash
-   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
-   ```
+```bash
+# Create production .env
+cp .env .env.production
+# Edit .env.production with production keys
 
-2. **Enable logging to files**:
-   Add logging configuration to `docker-compose.prod.yml`
+# Start with production env
+docker compose --env-file .env.production up -d
+```
 
-3. **Set up reverse proxy** (e.g., Nginx) for HTTPS
+### 2. Enable HTTPS
 
-4. **Configure backups** for volumes:
-   ```bash
-   docker run --rm -v voice-agent_vector_data:/data -v $(pwd):/backup alpine tar czf /backup/vector-data-backup.tar.gz /data
-   ```
+Use a reverse proxy (Nginx, Traefik) in front of the services.
 
-5. **Monitor with healthchecks**:
-   All services have healthcheck endpoints configured
+### 3. Set Up Monitoring
 
-6. **Use secrets management** instead of .env files
+Add healthcheck endpoints to your monitoring:
+- Voice Agent: `http://localhost:8081/health`
+- RabbitMQ: `http://localhost:15672/api/healthchecks/node`
+
+### 4. Configure Backups
+
+```bash
+# Backup volumes
+docker run --rm \
+  -v agentkit_vector_data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/vector-data-backup.tar.gz /data
+
+docker run --rm \
+  -v agentkit_rabbitmq_data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/rabbitmq-backup.tar.gz /data
+```
+
+### 5. Use Docker Secrets
+
+Instead of .env files in production:
+
+```yaml
+services:
+  voice-agent:
+    secrets:
+      - deepgram_key
+      - elevenlabs_key
+
+secrets:
+  deepgram_key:
+    external: true
+  elevenlabs_key:
+    external: true
+```
 
 ## Updating
 
@@ -297,80 +311,69 @@ To update the application:
 git pull
 
 # Rebuild and restart
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose up -d --build
 
 # Or rebuild specific service
-docker compose -f docker-compose.prod.yml up -d --build voice-agent
+docker compose up -d --build voice-agent
 ```
 
-## Uninstalling
+## Architecture
 
-To completely remove everything:
-
-```bash
-# Stop and remove containers, networks, and volumes
-docker compose -f docker-compose.prod.yml down -v
-
-# Remove images (optional)
-docker rmi voice-agent-voice-agent ollama/ollama rabbitmq:3.12-management-alpine
+```
+┌─────────────────────────────────────────┐
+│  Docker Compose Network                 │
+│                                          │
+│  ┌──────────┐    ┌──────────┐           │
+│  │ RabbitMQ │◄───┤  Voice   │           │
+│  │          │    │  Agent   │           │
+│  │  :5672   │───►│  :8081   │           │
+│  └──────────┘    │  :3001   │           │
+│                  └────┬─────┘           │
+│                       │                 │
+│                       ▼                 │
+│                  ┌──────────┐           │
+│                  │  Ollama  │           │
+│                  │  :11434  │           │
+│                  └──────────┘           │
+│                                          │
+└─────────────────────────────────────────┘
+         │                    │
+         │                    │
+    External APIs        Local Files
+    ─────────────        ──────────
+    Deepgram STT         data/documents
+    ElevenLabs TTS       data/vectorstore
+    Twilio Phone
 ```
 
-## Advanced Configuration
+## Files
 
-### Using Different Ollama Model
-
-Edit `docker-compose.prod.yml`:
-
-```yaml
-services:
-  ollama-init:
-    command: >
-      -c "ollama pull llama2:7b"  # Change model here
-
-  voice-agent:
-    environment:
-      - OLLAMA_MODEL=llama2:7b  # Change model here
-```
-
-### Exposing Services Externally
-
-To access services from other machines, change ports in `docker-compose.prod.yml`:
-
-```yaml
-ports:
-  - "0.0.0.0:3001:3001"  # WebSocket
-  - "0.0.0.0:8081:8081"  # HTTP
-```
-
-**Warning**: Only do this behind a firewall or VPN!
-
-### Using External RabbitMQ
-
-If you have an existing RabbitMQ instance:
-
-1. Remove the `rabbitmq` service from `docker-compose.prod.yml`
-2. Update the `RABBITMQ_URL` in `.env` to point to your instance
-3. Remove `rabbitmq` from `depends_on` in `voice-agent` service
+- `docker-compose.yml` - Complete multi-service setup
+- `Dockerfile.app` - Voice Agent container definition
+- `.dockerignore` - Build optimization
+- `docker-start.sh` - Interactive setup script
+- `DOCKER_SETUP.md` - This file
 
 ## Support
 
-For issues and questions:
-- Check the logs: `docker compose -f docker-compose.prod.yml logs`
-- Review the main README.md for application-specific documentation
-- Verify all API keys are correct in `.env`
+For issues:
+1. Check logs: `docker compose logs -f`
+2. Verify all services are healthy: `docker compose ps`
+3. Ensure .env has all required keys
+4. Check system resources (RAM, disk space)
 
 ## Summary
 
-**Single command to deploy everything:**
+**Single command deployment:**
 
 ```bash
-# 1. Create .env with your API keys
-# 2. Add documents to data/documents/
-# 3. Run:
-docker compose -f docker-compose.prod.yml up -d
-
-# 4. Monitor:
-docker compose -f docker-compose.prod.yml logs -f
+./docker-start.sh
 ```
 
-That's it! Your voice agent is now running with Ollama, RabbitMQ, and CPU-based embeddings.
+Or:
+
+```bash
+docker compose up -d
+```
+
+That's it! Everything runs in Docker with no external dependencies.

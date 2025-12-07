@@ -1,12 +1,11 @@
-version: '3.8'
-
 services:
+  # RabbitMQ Message Queue
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.12-management-alpine
     container_name: voice-agent-rabbitmq
     ports:
-      - "5672:5672"   # AMQP port
-      - "15672:15672" # Management UI
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -17,6 +16,123 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: voice-agent-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+
+  # Ollama Model Initialization
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: voice-agent-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      echo 'Waiting for Ollama service...' &&
+      sleep 10 &&
+      echo 'Pulling qwen2.5:0.5b model...' &&
+      ollama pull qwen2.5:0.5b &&
+      echo 'Model pulled successfully!'
+      "
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    networks:
+      - voice-agent-network
+    restart: "no"
+
+  # Voice Agent Application
+  voice-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: voice-agent-app
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      - "3001:3001"      # WebSocket server
+      - "8081:8081"      # Twilio webhook server
+    environment:
+      # LLM Configuration
+      - USE_LOCAL_MODEL=true
+      - OLLAMA_MODEL=qwen2.5:0.5b
+      - OLLAMA_BASE_URL=http://ollama:11434
+
+      # API Keys (loaded from .env file)
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+
+      # RabbitMQ Connection
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+
+      # Server Configuration
+      - PORT=8081
+      - WS_PORT=3001
+      - NODE_ENV=production
+    volumes:
+      - ./data/documents:/app/data/documents:ro
+      - vector_data:/app/data/vectorstore
+      - transformer_cache:/root/.cache/transformers
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8081/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+networks:
+  voice-agent-network:
+    driver: bridge
 
 volumes:
   rabbitmq_data:
+    driver: local
+  ollama_data:
+    driver: local
+  vector_data:
+    driver: local
+  transformer_cache:
+    driver: local
