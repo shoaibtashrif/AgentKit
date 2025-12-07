@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -e  # Exit on error
+# Exit on error, but allow cleanup to continue
+trap 'echo -e "\n${RED}Script interrupted${NC}"; exit 1' INT TERM
 
 # Colors for output
 RED='\033[0;31m'
@@ -34,78 +35,61 @@ echo -e "${GREEN}✓ Docker Compose installed${NC}"
 echo ""
 
 # Function to check and handle port conflicts
-check_port_conflict() {
+check_and_fix_port() {
     local port=$1
-    local service=$2
+    local service_name=$2
+    local our_container=$3
 
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1 ; then
-        local pid=$(lsof -ti:$port)
-        local process=$(ps -p $pid -o comm= 2>/dev/null || echo "unknown")
-
-        echo -e "${YELLOW}⚠ Port $port is already in use by $process (PID: $pid)${NC}"
-        echo -e "   This port is needed for: $service"
-
-        # Check if it's our own container
-        local container=$(docker ps --filter "publish=$port" --format "{{.Names}}" 2>/dev/null)
-        if [ ! -z "$container" ]; then
-            echo -e "   Running in container: ${BLUE}$container${NC}"
-            read -p "   Do you want to stop and remove this container? (y/n): " answer
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                echo "   Stopping $container..."
-                docker rm -f $container
-                return 0
-            else
-                echo -e "${RED}   Cannot continue with port $port in use${NC}"
-                return 1
-            fi
-        else
-            read -p "   Do you want to kill this process? (y/n): " answer
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                echo "   Killing process $pid..."
-                kill -9 $pid 2>/dev/null || sudo kill -9 $pid
-                sleep 1
-                return 0
-            else
-                echo -e "${RED}   Cannot continue with port $port in use${NC}"
-                return 1
-            fi
-        fi
+    if ! lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1 ; then
+        return 0  # Port is free
     fi
-    return 0
-}
 
-# Function to clean up old containers
-cleanup_old_containers() {
-    local containers=$(docker ps -a --filter "name=voice-agent-" --format "{{.Names}}" 2>/dev/null)
+    local pid=$(lsof -ti:$port 2>/dev/null)
 
-    if [ ! -z "$containers" ]; then
-        echo -e "${YELLOW}⚠ Found existing voice-agent containers:${NC}"
-        echo "$containers" | while read container; do
-            echo "   - $container"
-        done
-        echo ""
-        read -p "Do you want to remove these containers? (y/n): " answer
+    # Check if it's used by one of our containers
+    local container=$(docker ps --filter "publish=$port" --format "{{.Names}}" 2>/dev/null | grep "^${our_container}$")
+
+    if [ ! -z "$container" ]; then
+        echo -e "${YELLOW}⚠ Port $port is used by our old container: $container${NC}"
+        read -p "   Stop and remove $container? (y/n): " answer
         if [[ "$answer" =~ ^[Yy]$ ]]; then
-            echo "Removing old containers..."
-            echo "$containers" | xargs -r docker rm -f
-            echo -e "${GREEN}✓ Old containers removed${NC}"
+            echo "   Stopping $container..."
+            docker stop $container >/dev/null 2>&1
+            docker rm $container >/dev/null 2>&1
+            echo -e "   ${GREEN}✓ Removed $container${NC}"
+            return 0
+        else
+            echo -e "   ${RED}✗ Cannot start with port $port in use${NC}"
+            return 1
         fi
-        echo ""
+    else
+        # It's some other process
+        local process=$(ps -p $pid -o comm= 2>/dev/null || echo "unknown")
+        echo -e "${YELLOW}⚠ Port $port is used by: $process (PID: $pid)${NC}"
+        echo -e "   Needed for: $service_name"
+        read -p "   Kill this process? (y/n): " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            echo "   Killing process $pid..."
+            kill -9 $pid 2>/dev/null || sudo kill -9 $pid 2>/dev/null
+            sleep 1
+            echo -e "   ${GREEN}✓ Process killed${NC}"
+            return 0
+        else
+            echo -e "   ${RED}✗ Cannot start with port $port in use${NC}"
+            return 1
+        fi
     fi
 }
 
 # Check for port conflicts
 echo "Checking for port conflicts..."
-check_port_conflict 5672 "RabbitMQ" || exit 1
-check_port_conflict 15672 "RabbitMQ Management UI" || exit 1
-check_port_conflict 11434 "Ollama API" || exit 1
-check_port_conflict 8081 "Voice Agent HTTP/Webhook" || exit 1
-check_port_conflict 3001 "Voice Agent WebSocket" || exit 1
-echo -e "${GREEN}✓ All ports are available${NC}"
+check_and_fix_port 5672 "RabbitMQ" "voice-agent-rabbitmq" || exit 1
+check_and_fix_port 15672 "RabbitMQ Management" "voice-agent-rabbitmq" || exit 1
+check_and_fix_port 11434 "Ollama" "voice-agent-ollama" || exit 1
+check_and_fix_port 8081 "Voice Agent HTTP" "voice-agent-app" || exit 1
+check_and_fix_port 3001 "Voice Agent WebSocket" "voice-agent-app" || exit 1
+echo -e "${GREEN}✓ All required ports are available${NC}"
 echo ""
-
-# Clean up old containers
-cleanup_old_containers
 
 # Check if .env file exists
 if [ ! -f .env ]; then
@@ -120,7 +104,7 @@ if [ ! -f .env ]; then
     echo "  - TWILIO_AUTH_TOKEN"
     echo "  - TWILIO_PHONE_NUMBER"
     echo ""
-    read -p "Do you want to create a template .env file? (y/n): " answer
+    read -p "Create a template .env file? (y/n): " answer
     if [[ "$answer" =~ ^[Yy]$ ]]; then
         cat > .env << 'EOF'
 # Required API Keys
@@ -132,7 +116,7 @@ TWILIO_AUTH_TOKEN=your_twilio_token
 TWILIO_PHONE_NUMBER=your_twilio_phone
 EOF
         echo -e "${GREEN}✓ Created .env template${NC}"
-        echo -e "${YELLOW}⚠ Please edit .env with your actual API keys before continuing${NC}"
+        echo -e "${YELLOW}⚠ Please edit .env with your API keys, then run this script again${NC}"
         exit 0
     else
         echo -e "${RED}❌ Cannot start without .env file${NC}"
@@ -155,7 +139,11 @@ if [ -z "$(ls -A data/documents 2>/dev/null)" ]; then
     echo -e "${YELLOW}⚠ No documents found in data/documents/${NC}"
     echo "Add your knowledge base files to data/documents/ for RAG to work."
     echo ""
-    read -p "Press Enter to continue anyway or Ctrl+C to cancel..."
+    read -p "Continue anyway? (y/n): " answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        echo "Exiting. Add documents and run again."
+        exit 0
+    fi
 else
     DOC_COUNT=$(ls -1 data/documents/* 2>/dev/null | wc -l)
     echo -e "${GREEN}✓ Found $DOC_COUNT file(s) in data/documents/${NC}"
@@ -179,8 +167,12 @@ echo "Starting all containers..."
 if ! docker compose up -d --build 2>&1; then
     echo ""
     echo -e "${RED}❌ Failed to start services${NC}"
-    echo "Showing logs:"
-    docker compose logs --tail=50
+    echo ""
+    echo "Common issues:"
+    echo "  1. Check if ports are still in use: lsof -i :5672,11434,8081,3001"
+    echo "  2. Check Docker logs: docker compose logs"
+    echo "  3. Try: docker compose down && docker compose up -d"
+    echo ""
     exit 1
 fi
 
@@ -209,7 +201,7 @@ done
 if [ $COUNTER -ge $MAX_WAIT ]; then
     echo ""
     echo -e "${RED}❌ RabbitMQ failed to start${NC}"
-    docker compose logs rabbitmq
+    docker compose logs rabbitmq --tail=50
     exit 1
 fi
 
@@ -276,7 +268,7 @@ done
 
 if [ $COUNTER -ge $MAX_WAIT ]; then
     echo ""
-    echo -e "${YELLOW}⚠ Voice Agent is starting (check logs)${NC}"
+    echo -e "${YELLOW}⚠ Voice Agent is starting (may take a bit longer)${NC}"
 fi
 
 echo ""
