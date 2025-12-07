@@ -1,159 +1,113 @@
 #!/bin/bash
 
-#############################################
-# Voice Agent Installation Script
-# Supports: Ubuntu/Debian, macOS
-# Automatically installs all dependencies
-#############################################
+set -e
 
-set -e  # Exit on any error
-
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${BLUE}"
-echo "╔═══════════════════════════════════════════╗"
-echo "║   Voice Agent Installation Script        ║"
-echo "║   Installing all dependencies...          ║"
-echo "╚═══════════════════════════════════════════╝"
-echo -e "${NC}"
+echo -e "${GREEN}Voice Agent Installation${NC}\n"
 
 # Detect OS
-detect_os() {
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if [ -f /etc/debian_version ]; then
-            OS="debian"
-        elif [ -f /etc/redhat-release ]; then
-            OS="redhat"
-        else
-            OS="linux"
-        fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        OS="macos"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    OS="macos"
+elif [ -f /etc/debian_version ]; then
+    OS="debian"
+else
+    OS="other"
+fi
+
+# 1. Node.js
+echo -e "${YELLOW}[1/4] Node.js${NC}"
+if command -v node >/dev/null 2>&1; then
+    echo "✓ Already installed: $(node --version)"
+else
+    if [ "$OS" = "macos" ]; then
+        brew install node
+    elif [ "$OS" = "debian" ]; then
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
     else
-        OS="unknown"
+        echo -e "${RED}✗ Install Node.js manually${NC}"
+        exit 1
     fi
-    echo -e "${GREEN}✓${NC} Detected OS: ${YELLOW}$OS${NC}"
-}
+    echo "✓ Installed"
+fi
 
-# Check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+# 2. RabbitMQ
+echo -e "\n${YELLOW}[2/4] RabbitMQ${NC}"
 
-# Install Node.js
-install_nodejs() {
-    echo -e "\n${BLUE}[1/4]${NC} Checking Node.js..."
+# Check if port 5672 is accessible
+if timeout 2 bash -c ">/dev/tcp/localhost/5672" 2>/dev/null; then
+    echo "✓ Already running on port 5672"
 
-    if command_exists node; then
-        NODE_VERSION=$(node --version)
-        echo -e "${GREEN}✓${NC} Node.js already installed: ${YELLOW}$NODE_VERSION${NC}"
-
-        # Check if version is >= 18
-        MAJOR_VERSION=$(echo $NODE_VERSION | cut -d. -f1 | sed 's/v//')
-        if [ "$MAJOR_VERSION" -lt 18 ]; then
-            echo -e "${YELLOW}⚠${NC}  Node.js version is too old. Need v18 or higher."
-            echo "Please upgrade Node.js manually: https://nodejs.org/"
-            exit 1
-        fi
-    else
-        echo -e "${YELLOW}⚠${NC}  Node.js not found. Installing..."
-
-        if [ "$OS" = "macos" ]; then
-            if ! command_exists brew; then
-                echo -e "${RED}✗${NC} Homebrew not found. Please install from: https://brew.sh/"
-                exit 1
-            fi
-            brew install node
-        elif [ "$OS" = "debian" ]; then
-            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-            sudo apt-get install -y nodejs
-        elif [ "$OS" = "redhat" ]; then
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-            sudo yum install -y nodejs
-        else
-            echo -e "${RED}✗${NC} Unsupported OS. Please install Node.js manually."
-            exit 1
-        fi
-
-        echo -e "${GREEN}✓${NC} Node.js installed successfully"
+    # Show if Docker
+    if command -v docker >/dev/null && docker ps --format '{{.Ports}}' 2>/dev/null | grep -q "5672"; then
+        CONTAINER=$(docker ps --format '{{.Names}}\t{{.Ports}}' | grep "5672" | awk '{print $1}' | head -1)
+        echo "  (Docker container: $CONTAINER)"
     fi
-}
-
-# Install RabbitMQ
-install_rabbitmq() {
-    echo -e "\n${BLUE}[2/4]${NC} Checking RabbitMQ..."
-
-    if command_exists rabbitmq-server; then
-        echo -e "${GREEN}✓${NC} RabbitMQ already installed"
-    else
-        echo -e "${YELLOW}⚠${NC}  RabbitMQ not found. Installing..."
-
-        if [ "$OS" = "macos" ]; then
-            brew install rabbitmq
-        elif [ "$OS" = "debian" ]; then
+else
+    # Install if not running
+    if [ "$OS" = "macos" ]; then
+        brew install rabbitmq
+        brew services start rabbitmq
+    elif [ "$OS" = "debian" ]; then
+        # Check for existing installation
+        if command -v rabbitmq-server >/dev/null 2>&1; then
+            echo "Starting existing installation..."
+            sudo systemctl start rabbitmq-server
+        else
+            # Clean install
             sudo apt-get update
             sudo apt-get install -y rabbitmq-server
-        elif [ "$OS" = "redhat" ]; then
-            sudo yum install -y rabbitmq-server
-        else
-            echo -e "${RED}✗${NC} Unsupported OS. Please install RabbitMQ manually."
-            exit 1
+            sudo systemctl enable rabbitmq-server
+            sudo systemctl start rabbitmq-server
         fi
-
-        echo -e "${GREEN}✓${NC} RabbitMQ installed successfully"
-    fi
-
-    # Start RabbitMQ
-    echo "Starting RabbitMQ service..."
-    if [ "$OS" = "macos" ]; then
-        brew services start rabbitmq || true
     else
-        sudo systemctl enable rabbitmq-server || true
-        sudo systemctl start rabbitmq-server || true
+        echo -e "${RED}✗ Install RabbitMQ manually or use Docker:${NC}"
+        echo "docker run -d --name rabbitmq -p 5672:5672 rabbitmq:3"
+        exit 1
     fi
 
-    echo -e "${GREEN}✓${NC} RabbitMQ service started"
-}
-
-# Install Ollama
-install_ollama() {
-    echo -e "\n${BLUE}[3/4]${NC} Checking Ollama..."
-
-    if command_exists ollama; then
-        echo -e "${GREEN}✓${NC} Ollama already installed"
+    # Wait and verify
+    sleep 3
+    if timeout 2 bash -c ">/dev/tcp/localhost/5672" 2>/dev/null; then
+        echo "✓ Started successfully"
     else
-        echo -e "${YELLOW}⚠${NC}  Ollama not found. Installing..."
-        curl -fsSL https://ollama.ai/install.sh | sh
-        echo -e "${GREEN}✓${NC} Ollama installed successfully"
+        echo -e "${RED}✗ Failed to start. See deployment/guide.md${NC}"
+        exit 1
     fi
+fi
 
-    # Pull the model
-    echo "Pulling Ollama model: qwen2.5:0.5b..."
+# 3. Ollama
+echo -e "\n${YELLOW}[3/4] Ollama${NC}"
+if command -v ollama >/dev/null 2>&1; then
+    echo "✓ Already installed"
+else
+    curl -fsSL https://ollama.ai/install.sh | sh
+    echo "✓ Installed"
+fi
+
+# Pull model
+if ollama list 2>/dev/null | grep -q "qwen2.5:0.5b"; then
+    echo "✓ Model qwen2.5:0.5b ready"
+else
+    echo "Pulling qwen2.5:0.5b..."
     ollama pull qwen2.5:0.5b
-    echo -e "${GREEN}✓${NC} Model downloaded"
-}
+    echo "✓ Model downloaded"
+fi
 
-# Install NPM dependencies
-install_npm_deps() {
-    echo -e "\n${BLUE}[4/4]${NC} Installing NPM packages..."
+# 4. NPM packages
+echo -e "\n${YELLOW}[4/4] NPM packages${NC}"
+npm install
+echo "✓ Installed"
 
-    npm install
-
-    echo -e "${GREEN}✓${NC} NPM packages installed"
-}
-
-# Setup .env file
-setup_env() {
-    echo -e "\n${BLUE}[Config]${NC} Setting up environment variables..."
-
-    if [ ! -f .env ]; then
-        echo -e "${YELLOW}⚠${NC}  .env file not found. Creating template..."
-        cat > .env << 'EOF'
+# Setup .env
+echo -e "\n${YELLOW}Configuration${NC}"
+if [ ! -f .env ]; then
+    cat > .env << 'EOF'
 # LLM Configuration
 USE_LOCAL_MODEL=true
 OLLAMA_MODEL=qwen2.5:0.5b
@@ -166,57 +120,26 @@ ELEVENLABS_VOICE_ID=your_voice_id_here
 TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
 TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
 
-# Optional: OpenAI (only if USE_LOCAL_MODEL=false)
-# OPENAI_API_KEY=your_openai_api_key_here
-
 # RabbitMQ Configuration
 RABBITMQ_URL=amqp://localhost:5672
 EOF
-        echo -e "${GREEN}✓${NC} .env file created"
-        echo -e "${YELLOW}⚠${NC}  IMPORTANT: Edit .env file and add your API keys!"
-    else
-        echo -e "${GREEN}✓${NC} .env file already exists"
-    fi
-}
+    echo "✓ Created .env template"
+    echo -e "${YELLOW}⚠  Edit .env and add your API keys${NC}"
+else
+    echo "✓ .env already exists"
+fi
 
 # Ingest documents
-ingest_documents() {
-    echo -e "\n${BLUE}[Setup]${NC} Ingesting knowledge base documents..."
+if [ -d "data/documents" ] && [ "$(ls -A data/documents 2>/dev/null)" ]; then
+    echo -e "\n${YELLOW}Ingesting documents...${NC}"
+    node ingest-documents.js
+    echo "✓ Documents ingested"
+fi
 
-    if [ -d "data/documents" ] && [ "$(ls -A data/documents 2>/dev/null)" ]; then
-        node ingest-documents.js
-        echo -e "${GREEN}✓${NC} Documents ingested"
-    else
-        echo -e "${YELLOW}⚠${NC}  No documents found in data/documents/"
-        echo "Skipping ingestion. Add documents later and run: node ingest-documents.js"
-    fi
-}
-
-# Main installation flow
-main() {
-    detect_os
-    install_nodejs
-    install_rabbitmq
-    install_ollama
-    install_npm_deps
-    setup_env
-    ingest_documents
-
-    echo -e "\n${GREEN}"
-    echo "╔═══════════════════════════════════════════╗"
-    echo "║   ✓ Installation Complete!               ║"
-    echo "╚═══════════════════════════════════════════╝"
-    echo -e "${NC}"
-
-    echo -e "\n${BLUE}Next Steps:${NC}"
-    echo "1. Edit .env file and add your API keys"
-    echo "2. Start the server: ${YELLOW}npm start${NC}"
-    echo "3. Server will run on:"
-    echo "   - WebSocket: ws://localhost:3001"
-    echo "   - Twilio: http://localhost:8081/voice"
-    echo ""
-    echo "For more details, see: deployment/DEPLOYMENT_GUIDE.md"
-}
-
-# Run installation
-main
+# Done
+echo -e "\n${GREEN}✓ Installation Complete!${NC}\n"
+echo "Next steps:"
+echo "1. Edit .env with your API keys"
+echo "2. Run: npm start"
+echo ""
+echo "If errors occur, see: deployment/guide.md"

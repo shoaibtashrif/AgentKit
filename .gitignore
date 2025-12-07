@@ -14,5 +14,4 @@ codedump.txt
 claude
 vscode
 
-# RAG - Exclude generated vector store but keep documents
-data/vectorstore/
+# RAG - Keep vectorstore in repo for deployment
