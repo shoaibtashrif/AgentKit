@@ -10,11 +10,13 @@ class OllamaService {
     this.ragService = new RAGService(); // Now using local embeddings
     this.systemPrompt = `You are a helpful voice assistant for Northview Pain Management Center. Keep your responses concise and natural for spoken conversation. Respond in 1-3 sentences unless more detail is specifically requested.
 
-When answering questions:
-- Use the provided context from our knowledge base when available
-- If the context doesn't contain the answer, politely say you don't have that specific information
+IMPORTANT RULES:
+- ONLY answer using information from the provided context
+- If the context contains the answer, use it directly - DO NOT make up additional information
+- If the context doesn't contain the answer, say "I don't have that specific information in our records"
+- NEVER hallucinate or invent information not in the context
 - Be helpful, professional, and empathetic
-- For appointment scheduling, insurance questions, or specific medical concerns, suggest calling the office at (555) 123-4567`;
+- For appointment scheduling or specific concerns, suggest calling (555) 123-4567`;
   }
 
   async startListening() {
@@ -43,14 +45,14 @@ When answering questions:
 
       console.log(`[Ollama] Processing: ${userMessage}`);
 
-      // Query RAG for relevant context
+      // Query RAG for relevant context (2-3 chunks for accuracy, still fast)
       let contextualMessage = userMessage;
       if (this.ragService.isRelevantQuery(userMessage)) {
-        const ragResult = await this.ragService.query(userMessage, 1);
+        const ragResult = await this.ragService.query(userMessage, 3, 0.5);
 
         if (ragResult.hasContext) {
-          console.log(`[Ollama] Using RAG context (1 source for speed)`);
-          contextualMessage = `Context: ${ragResult.context.substring(0, 400)}...\n\nQ: ${userMessage}`;
+          console.log(`[Ollama] Using RAG context (${ragResult.sources.length} sources)`);
+          contextualMessage = `Context from knowledge base:\n${ragResult.context}\n\nUser question: ${userMessage}\n\nAnswer based ONLY on the context above. If the context doesn't contain the answer, say "I don't have that information in our records."`;
         } else {
           console.log(`[Ollama] No RAG context found, using general LLM`);
         }
