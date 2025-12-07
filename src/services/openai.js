@@ -46,23 +46,38 @@ IMPORTANT RULES:
       console.log(`[OpenAI] Processing: ${userMessage}`);
 
       // Query RAG for relevant context (2-3 chunks for accuracy, still fast)
-      let contextualMessage = userMessage;
       if (this.ragService.isRelevantQuery(userMessage)) {
         const ragResult = await this.ragService.query(userMessage, 3, 0.5);
 
         if (ragResult.hasContext) {
-          console.log(`[OpenAI] Using RAG context (${ragResult.sources.length} sources)`);
+          console.log(`[OpenAI] RAG found context (confidence: ${ragResult.confidence})`);
 
-          // Provide full context with clear instruction
-          contextualMessage = `Context from knowledge base:\n${ragResult.context}\n\nUser question: ${userMessage}\n\nAnswer based ONLY on the context above. If the context doesn't contain the answer, say "I don't have that information in our records."`;
+          // HIGH CONFIDENCE: Return direct answer (SKIP LLM!)
+          if (ragResult.directAnswer && ragResult.confidence === 'high') {
+            console.log('[OpenAI] ⚡ Direct answer from RAG (SKIPPING LLM for speed)');
+
+            // Send answer directly without LLM processing
+            await rabbitmq.publish(rabbitmq.queues.TTS_REQUEST, {
+              sessionId,
+              text: ragResult.directAnswer,
+              timestamp: Date.now()
+            });
+
+            return; // Exit early - no LLM needed!
+          }
+
+          // MEDIUM/LOW CONFIDENCE: Use LLM with RAG context
+          console.log(`[OpenAI] Using LLM with RAG context (${ragResult.sources.length} sources)`);
+          const contextualMessage = `Context from knowledge base:\n${ragResult.context}\n\nUser question: ${userMessage}\n\nAnswer based ONLY on the context above. If the context doesn't contain the answer, say "I don't have that information in our records."`;
+          history.push({ role: 'user', content: contextualMessage });
         } else {
           console.log(`[OpenAI] No RAG context found, using general LLM`);
+          history.push({ role: 'user', content: userMessage });
         }
       } else {
         console.log(`[OpenAI] Query not relevant to knowledge base, using general LLM`);
+        history.push({ role: 'user', content: userMessage });
       }
-
-      history.push({ role: 'user', content: contextualMessage });
 
       this.activeGenerations.set(sessionId, true);
 

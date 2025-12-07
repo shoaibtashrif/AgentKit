@@ -3,6 +3,7 @@ import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { TextLoader } from 'langchain/document_loaders/fs/text';
 import { DirectoryLoader } from 'langchain/document_loaders/fs/directory';
 import LocalEmbeddings from './local-embeddings.js';
+import JSONLLoader from './jsonl-loader.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -114,16 +115,31 @@ class RAGService {
 
       console.log('[RAG] Loading documents from:', documentsPath);
 
-      // Load all text files from the documents directory
-      const loader = new DirectoryLoader(
+      let docs = [];
+
+      // Load .txt files
+      const txtLoader = new DirectoryLoader(
         documentsPath,
         {
           '.txt': (path) => new TextLoader(path)
         }
       );
+      const txtDocs = await txtLoader.load();
+      docs.push(...txtDocs);
+      console.log(`[RAG] Loaded ${txtDocs.length} .txt documents`);
 
-      const docs = await loader.load();
-      console.log(`[RAG] Loaded ${docs.length} documents`);
+      // Load .jsonl files
+      const jsonlFiles = fs.readdirSync(documentsPath)
+        .filter(file => file.endsWith('.jsonl'))
+        .map(file => path.join(documentsPath, file));
+
+      for (const jsonlFile of jsonlFiles) {
+        const loader = new JSONLLoader(jsonlFile);
+        const jsonlDocs = await loader.load();
+        docs.push(...jsonlDocs);
+      }
+
+      console.log(`[RAG] Total loaded: ${docs.length} documents`);
 
       if (docs.length === 0) {
         throw new Error('No documents found to ingest');
@@ -204,13 +220,15 @@ class RAGService {
 
       const context = contextParts.join('\n\n');
 
-      // Extract source metadata with scores
+      // Extract source metadata with scores and check for direct answers
       const sources = filtered.map((result) => {
         const [doc, score] = result;
         return {
           source: doc.metadata.source,
           content: doc.pageContent.substring(0, 100) + '...',
-          score: score
+          score: score,
+          metadata: doc.metadata,
+          fullContent: doc.pageContent
         };
       });
 
@@ -219,10 +237,15 @@ class RAGService {
         console.log(`[RAG] Best match score: ${(sources[0].score * 100).toFixed(0)}%`);
       }
 
+      // Check if we have a high-confidence direct answer from Q&A pairs
+      const directAnswer = this.extractDirectAnswer(sources);
+
       return {
         hasContext: true,
         context,
-        sources
+        sources,
+        directAnswer: directAnswer.answer,
+        confidence: directAnswer.confidence
       };
     } catch (error) {
       console.error('[RAG] Error querying:', error.message);
@@ -233,6 +256,36 @@ class RAGService {
         error: error.message
       };
     }
+  }
+
+  /**
+   * Extract direct answer from Q&A pairs with high confidence
+   * @param {Array} sources - Retrieved sources with scores
+   * @returns {Object} {answer: string|null, confidence: string}
+   */
+  extractDirectAnswer(sources) {
+    if (!sources || sources.length === 0) {
+      return { answer: null, confidence: 'none' };
+    }
+
+    const topSource = sources[0];
+
+    // High confidence: score >= 0.8 AND it's a Q&A pair with full answer
+    if (topSource.score >= 0.8 && topSource.metadata.type === 'qa_pair') {
+      console.log('[RAG] ✓ High confidence direct answer (score >= 0.8, Q&A pair)');
+      return {
+        answer: topSource.metadata.answer,
+        confidence: 'high'
+      };
+    }
+
+    // Medium confidence: score >= 0.6
+    if (topSource.score >= 0.6) {
+      return { answer: null, confidence: 'medium' };
+    }
+
+    // Low confidence: score < 0.6
+    return { answer: null, confidence: 'low' };
   }
 
   /**
