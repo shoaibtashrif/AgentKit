@@ -1,0 +1,48 @@
+services:
+  # Voice Agent Application
+  voice-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: voice-agent-app
+    network_mode: "host"
+    environment:
+      # LLM Configuration - Using host Ollama
+      - USE_LOCAL_MODEL=true
+      - OLLAMA_MODEL=qwen2.5:0.5b
+      - OLLAMA_BASE_URL=http://localhost:11434
+
+      # API Keys (loaded from .env file)
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+
+      # RabbitMQ Connection - Using host RabbitMQ on localhost
+      - RABBITMQ_URL=amqp://localhost:5672
+
+      # Server Configuration
+      - PORT=8081
+      - WS_PORT=3001
+      - NODE_ENV=production
+    volumes:
+      - ./data/documents:/app/data/documents:ro
+      - vector_data:/app/data/vectorstore
+      - transformer_cache:/root/.cache/transformers
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+volumes:
+  vector_data:
+    driver: local
+  transformer_cache:
+    driver: local

@@ -1,0 +1,72 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Deployment
+deployment/
+.claude/
+
+# Testing
+test/
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Data (will be mounted as volumes)
+data/vectorstore/
+data/cache/
+
+# Junk
+junk/
+
+# Client (if not needed in container)
+client/
+
+# Scripts (if not needed in container)
+scripts/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
