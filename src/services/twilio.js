@@ -31,6 +31,11 @@ class TwilioService {
       this.handleIncomingCall(req, res);
     });
 
+    // Support both /voice and /twilio/voice for compatibility
+    this.app.post('/twilio/voice', (req, res) => {
+      this.handleIncomingCall(req, res);
+    });
+
     this.app.post('/voice/stream', (req, res) => {
       res.status(200).send('OK');
     });

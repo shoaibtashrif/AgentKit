@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import rabbitmq from './config/rabbitmq.js';
 import DeepgramService from './services/deepgram.js';
 import OpenAIService from './services/openai.js';
+import OllamaService from './services/ollama.js';
 import ElevenLabsService from './services/elevenlabs.js';
 import VoiceWebSocketServer from './server/websocket.js';
 import TwilioService from './services/twilio.js';
@@ -11,7 +12,19 @@ dotenv.config();
 class VoiceAgent {
   constructor() {
     this.deepgramService = new DeepgramService(process.env.DEEPGRAM_API_KEY);
-    this.openaiService = new OpenAIService(process.env.OPENAI_API_KEY);
+
+    // Choose LLM service based on USE_LOCAL_MODEL flag
+    const useLocalModel = process.env.USE_LOCAL_MODEL === 'true';
+    if (useLocalModel) {
+      const ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5:0.5b';
+      const ollamaUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+      console.log(`🤖 Using local Ollama model: ${ollamaModel}`);
+      this.llmService = new OllamaService(ollamaUrl, ollamaModel);
+    } else {
+      console.log(`🤖 Using OpenAI model: gpt-4o-mini`);
+      this.llmService = new OpenAIService(process.env.OPENAI_API_KEY);
+    }
+
     this.elevenlabsService = new ElevenLabsService(
       process.env.ELEVENLABS_API_KEY,
       process.env.ELEVENLABS_VOICE_ID
@@ -33,7 +46,7 @@ class VoiceAgent {
 
       await this.setupTranscriptionConsumer();
 
-      await this.openaiService.startListening();
+      await this.llmService.startListening();
 
       await this.elevenlabsService.startListening();
 
@@ -89,7 +102,7 @@ class VoiceAgent {
       const { sessionId, transcript } = message;
 
       // Stop all generation immediately on user interruption
-      this.openaiService.stopGeneration(sessionId);
+      this.llmService.stopGeneration(sessionId);
       this.elevenlabsService.stopGeneration(sessionId);
 
       await rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
@@ -153,7 +166,7 @@ class VoiceAgent {
 
     // Clear all services for this session
     this.deepgramService.closeConnection(sessionId);
-    this.openaiService.clearHistory(sessionId);
+    this.llmService.clearHistory(sessionId);
     this.elevenlabsService.clearSession(sessionId);
     this.twilioService.cleanupSession(sessionId);
     this.activeTranscriptions.delete(sessionId);
@@ -171,7 +184,7 @@ class VoiceAgent {
     console.log('\n🛑 Shutting down Voice Agent...');
 
     this.deepgramService.closeAllConnections();
-    this.openaiService.clearAllHistory();
+    this.llmService.clearAllHistory();
     this.wsServer.close();
     this.twilioService.close();
     await rabbitmq.close();

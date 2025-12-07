@@ -4,23 +4,21 @@ import RAGService from './src/services/rag.js';
 dotenv.config();
 
 async function main() {
-  console.log('🔄 Starting document ingestion...\n');
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ Error: OPENAI_API_KEY not found in .env file');
-    process.exit(1);
-  }
+  console.log('🔄 Starting document ingestion with local embeddings...\n');
 
   try {
-    const ragService = new RAGService(process.env.OPENAI_API_KEY);
+    const ragService = new RAGService();
 
-    console.log('📚 Ingesting documents from data/documents directory...');
-    await ragService.ingestDocuments();
+    // Initialize the RAG service (starts local embedding service)
+    console.log('🚀 Initializing RAG service...');
+    await ragService.initialize();
 
     console.log('\n✅ Document ingestion completed successfully!');
     console.log('📊 Vector store saved to: data/vectorstore');
     console.log('\nYou can now start the voice agent with: npm start');
 
+    // Stop the embedding service
+    await ragService.embeddings.stop();
     process.exit(0);
   } catch (error) {
     console.error('\n❌ Error during ingestion:', error.message);

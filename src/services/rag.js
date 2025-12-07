@@ -1,8 +1,8 @@
-import { OpenAIEmbeddings } from '@langchain/openai';
 import { FaissStore } from '@langchain/community/vectorstores/faiss';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { TextLoader } from 'langchain/document_loaders/fs/text';
 import { DirectoryLoader } from 'langchain/document_loaders/fs/directory';
+import LocalEmbeddings from './local-embeddings.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -11,22 +11,51 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 class RAGService {
-  constructor(openaiApiKey) {
-    this.openaiApiKey = openaiApiKey;
-    this.embeddings = new OpenAIEmbeddings({
-      openAIApiKey: openaiApiKey,
-      modelName: 'text-embedding-3-small' // Fast and cost-effective
-    });
+  constructor() {
+    this.embeddings = new LocalEmbeddings();
     this.vectorStore = null;
     this.vectorStorePath = path.join(__dirname, '../../data/vectorstore');
   }
 
   /**
    * Initialize the RAG system by loading or creating the vector store
+   * Auto-ingests documents if vectorstore is missing or outdated
    */
   async initialize() {
     try {
-      // Try to load existing FAISS vector store
+      // Start the local embedding service
+      console.log('[RAG] Starting local embedding service...');
+      await this.embeddings.start();
+      console.log('✓ Local embedding service started');
+
+      const documentsPath = path.join(__dirname, '../../data/documents');
+      const vectorStoreIndexPath = path.join(this.vectorStorePath, 'faiss.index');
+      const vectorStoreExists = fs.existsSync(vectorStoreIndexPath);
+      const documentsExist = fs.existsSync(documentsPath);
+
+      // Check if we need to ingest
+      let needsIngestion = false;
+
+      if (!vectorStoreExists && documentsExist) {
+        console.log('[RAG] No vector store found. Auto-ingesting documents...');
+        needsIngestion = true;
+      } else if (vectorStoreExists && documentsExist) {
+        // Check if documents are newer than vectorstore
+        const vectorStoreTime = this.getLatestFileTime(this.vectorStorePath);
+        const documentsTime = this.getLatestFileTime(documentsPath);
+
+        if (documentsTime > vectorStoreTime) {
+          console.log('[RAG] Documents updated. Re-ingesting...');
+          needsIngestion = true;
+        }
+      }
+
+      // Perform ingestion if needed
+      if (needsIngestion) {
+        await this.ingestDocuments();
+      }
+
+      // Load the vector store
       if (fs.existsSync(this.vectorStorePath)) {
         console.log('[RAG] Loading existing FAISS vector store...');
         this.vectorStore = await FaissStore.load(
@@ -36,12 +65,39 @@ class RAGService {
         console.log('✓ RAG FAISS vector store loaded successfully');
         return true;
       } else {
-        console.log('[RAG] No vector store found. Please run document ingestion first.');
+        console.log('[RAG] No vector store found and no documents to ingest.');
         return false;
       }
     } catch (error) {
       console.error('[RAG] Error initializing:', error.message);
       return false;
+    }
+  }
+
+  /**
+   * Get the latest modification time of files in a directory
+   */
+  getLatestFileTime(dirPath) {
+    try {
+      const stats = fs.statSync(dirPath);
+      if (!stats.isDirectory()) {
+        return stats.mtime;
+      }
+
+      let latestTime = stats.mtime;
+      const files = fs.readdirSync(dirPath);
+
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        const fileStats = fs.statSync(filePath);
+        if (fileStats.mtime > latestTime) {
+          latestTime = fileStats.mtime;
+        }
+      }
+
+      return latestTime;
+    } catch (error) {
+      return new Date(0); // Return epoch if error
     }
   }
 
@@ -73,10 +129,10 @@ class RAGService {
         throw new Error('No documents found to ingest');
       }
 
-      // Split documents into chunks (smaller for speed)
+      // Split documents into chunks (optimized for voice)
       const textSplitter = new RecursiveCharacterTextSplitter({
         chunkSize: 300,
-        chunkOverlap: 30
+        chunkOverlap: 60  // 20% overlap for better context preservation
       });
 
       const splitDocs = await textSplitter.splitDocuments(docs);
@@ -107,10 +163,11 @@ class RAGService {
   /**
    * Query the RAG system for relevant context
    * @param {string} query - The user's question
-   * @param {number} k - Number of relevant documents to retrieve (default: 3)
+   * @param {number} k - Number of relevant documents to retrieve (default: 2 for voice)
+   * @param {number} scoreThreshold - Minimum similarity score (0-1, default: 0.7)
    * @returns {Promise<Object>} Object containing context and metadata
    */
-  async query(query, k = 3) {
+  async query(query, k = 2, scoreThreshold = 0.7) {
     try {
       if (!this.vectorStore) {
         console.warn('[RAG] Vector store not initialized, initializing now...');
@@ -124,10 +181,14 @@ class RAGService {
         }
       }
 
-      // Search for relevant documents
+      // Search for relevant documents with similarity scores
       const results = await this.vectorStore.similaritySearchWithScore(query, k);
 
-      if (results.length === 0) {
+      // Filter by similarity score threshold
+      const filtered = results.filter(([doc, score]) => score >= scoreThreshold);
+
+      if (filtered.length === 0) {
+        console.log(`[RAG] No documents found above threshold ${scoreThreshold} for query`);
         return {
           hasContext: false,
           context: '',
@@ -135,24 +196,28 @@ class RAGService {
         };
       }
 
-      // Format context from results
-      const contextParts = results.map((result, index) => {
-        const [doc] = result;
-        return `[Source ${index + 1}]:\n${doc.pageContent}`;
+      // Format context from filtered results
+      const contextParts = filtered.map((result, index) => {
+        const [doc, score] = result;
+        return `[Source ${index + 1}] (relevance: ${(score * 100).toFixed(0)}%):\n${doc.pageContent}`;
       });
 
       const context = contextParts.join('\n\n');
 
-      // Extract source metadata
-      const sources = results.map((result) => {
-        const [doc] = result;
+      // Extract source metadata with scores
+      const sources = filtered.map((result) => {
+        const [doc, score] = result;
         return {
           source: doc.metadata.source,
-          content: doc.pageContent.substring(0, 100) + '...'
+          content: doc.pageContent.substring(0, 100) + '...',
+          score: score
         };
       });
 
-      console.log(`[RAG] Found ${results.length} relevant documents for query: "${query.substring(0, 50)}..."`);
+      console.log(`[RAG] Found ${filtered.length}/${results.length} relevant documents (threshold: ${scoreThreshold}) for query: "${query.substring(0, 50)}..."`);
+      if (filtered.length > 0) {
+        console.log(`[RAG] Best match score: ${(sources[0].score * 100).toFixed(0)}%`);
+      }
 
       return {
         hasContext: true,
