@@ -131,6 +131,20 @@ class TwilioService {
 
   async processAudioQueue(sessionId) {
     const queue = this.audioQueues.get(sessionId);
+
+    // Check if session was interrupted
+    const callData = Array.from(this.activeCalls.values()).find(
+      data => data.sessionId === sessionId
+    );
+
+    if (callData && callData.audioCleared) {
+      // Clear queue and stop processing on interruption
+      this.audioQueues.set(sessionId, []);
+      this.processing.set(sessionId, false);
+      logger.info('Twilio', '🛑 Queue processing stopped due to interruption');
+      return;
+    }
+
     if (!queue || queue.length === 0) {
       this.processing.set(sessionId, false);
       return;
@@ -143,8 +157,8 @@ class TwilioService {
 
     await this.sendAudioToCall(sessionId, audio);
 
-    // Process next in queue
-    if (queue.length > 0) {
+    // Process next in queue only if not interrupted
+    if (queue.length > 0 && !callData?.audioCleared) {
       this.processAudioQueue(sessionId);
     } else {
       this.processing.set(sessionId, false);
@@ -182,12 +196,19 @@ class TwilioService {
       const { sessionId, audio, streaming, endOfSentence } = message;
 
       // Verify session still exists
-      const sessionExists = Array.from(this.activeCalls.values()).some(
-        callData => callData.sessionId === sessionId
+      const callData = Array.from(this.activeCalls.values()).find(
+        data => data.sessionId === sessionId
       );
 
-      if (!sessionExists) {
+      if (!callData) {
         logger.warn('Twilio', `Ignoring audio for ended session ${sessionId}`);
+        return;
+      }
+
+      // CRITICAL: Check if audio was cleared (user is interrupting)
+      // Don't queue new audio if interruption is active
+      if (callData.audioCleared) {
+        logger.info('Twilio', '🛑 Dropping audio chunk - session is interrupted');
         return;
       }
 
@@ -451,8 +472,13 @@ class TwilioService {
   clearAudioForSession(sessionId) {
     for (const [callSid, callData] of this.activeCalls) {
       if (callData.sessionId === sessionId) {
-        // Mark audio as cleared
+        // Mark audio as cleared immediately
         callData.audioCleared = true;
+
+        // Clear any existing clear timer
+        if (callData.clearTimer) {
+          clearTimeout(callData.clearTimer);
+        }
 
         // Clear any pending audio chunks
         if (callData.audioChunks) {
@@ -485,10 +511,13 @@ class TwilioService {
 
         logger.warn('Twilio', `🛑 Interruption: Cleared all audio for session ${sessionId}`);
 
-        // Reset the flag after a short delay
-        setTimeout(() => {
+        // Reset the flag after 300ms - enough time for new audio to be blocked
+        // but not so long that legitimate audio after interruption is lost
+        callData.clearTimer = setTimeout(() => {
           callData.audioCleared = false;
-        }, 50); // Reduced from 100ms to 50ms
+          callData.clearTimer = null;
+          logger.info('Twilio', '✓ Audio cleared flag reset - ready for new audio');
+        }, 300);
 
         return;
       }

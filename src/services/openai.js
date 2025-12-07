@@ -68,7 +68,7 @@ IMPORTANT RULES:
 
           // MEDIUM/LOW CONFIDENCE: Use LLM with RAG context
           console.log(`[OpenAI] Using LLM with RAG context (${ragResult.sources.length} sources)`);
-          const contextualMessage = `Context from knowledge base:\n${ragResult.context}\n\nUser question: ${userMessage}\n\nAnswer based ONLY on the context above. If the context doesn't contain the answer, say "I don't have that information in our records."`;
+          const contextualMessage = `Context from knowledge base:\n${ragResult.context}\n\nUser question: ${userMessage}\n\nProvide a natural, conversational answer using ONLY the information in the context above. Do not mention sources, relevance scores, or any technical details. Speak naturally as if you're having a conversation. If the context doesn't contain the answer, say "I don't have that information in our records."`;
           history.push({ role: 'user', content: contextualMessage });
         } else {
           console.log(`[OpenAI] No RAG context found, using general LLM`);
