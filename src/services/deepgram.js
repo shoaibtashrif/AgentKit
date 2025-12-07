@@ -43,6 +43,8 @@ class DeepgramService {
       });
 
       let lastInterruptTime = 0;
+      let interimTranscriptBuffer = '';
+      let interimStartTime = 0;
 
       connection.on('Results', async (data) => {
         const transcript = data.channel?.alternatives?.[0]?.transcript;
@@ -50,17 +52,45 @@ class DeepgramService {
         const speechFinal = data.speech_final;
 
         // Handle interruption - if user starts speaking, stop current audio
-        // Only interrupt once per 500ms to avoid excessive clearing
+        // Require 2+ words OR 150ms+ of speech to avoid false triggers from noise
         if (transcript && transcript.trim().length > 0 && !isFinal) {
           const now = Date.now();
-          if (now - lastInterruptTime > 500) {
-            logger.info('Deepgram', `User interruption detected: "${transcript}"`);
+
+          // Start tracking interim speech
+          if (interimTranscriptBuffer === '') {
+            interimStartTime = now;
+            interimTranscriptBuffer = transcript;
+          } else {
+            interimTranscriptBuffer = transcript;
+          }
+
+          const speechDuration = now - interimStartTime;
+          const wordCount = transcript.trim().split(/\s+/).length;
+
+          // Trigger interruption if:
+          // - At least 2 words spoken OR
+          // - More than 150ms of continuous speech OR
+          // - Transcript is 5+ characters long
+          // AND we haven't interrupted in the last 500ms
+          const shouldInterrupt =
+            (wordCount >= 2 || speechDuration > 150 || transcript.trim().length >= 5) &&
+            (now - lastInterruptTime > 500);
+
+          if (shouldInterrupt) {
+            logger.info('Deepgram', `🛑 User interruption detected: "${transcript}" (${wordCount} words, ${speechDuration}ms)`);
             await rabbitmq.publish(rabbitmq.queues.CLEAR_AUDIO, {
               sessionId,
               timestamp: now
             });
             lastInterruptTime = now;
+            interimTranscriptBuffer = '';
           }
+        }
+
+        // Reset interim buffer on silence or final
+        if (isFinal || speechFinal) {
+          interimTranscriptBuffer = '';
+          interimStartTime = 0;
         }
 
         if (transcript && transcript.trim().length > 0 && isFinal) {

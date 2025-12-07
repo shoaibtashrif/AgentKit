@@ -212,10 +212,15 @@ class RAGService {
         };
       }
 
-      // Format context from filtered results
+      // Format context from filtered results - clean format without technical metadata
       const contextParts = filtered.map((result, index) => {
         const [doc, score] = result;
-        return `[Source ${index + 1}] (relevance: ${(score * 100).toFixed(0)}%):\n${doc.pageContent}`;
+        // For Q&A pairs, extract just the answer
+        if (doc.metadata.type === 'qa_pair' && doc.metadata.answer) {
+          return doc.metadata.answer;
+        }
+        // For other content, return the page content
+        return doc.pageContent;
       });
 
       const context = contextParts.join('\n\n');
